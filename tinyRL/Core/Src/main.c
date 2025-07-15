@@ -105,7 +105,7 @@ int main(void)
   //create neural network
   NeuralNet net;
   int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
-  int net_topology[] = {2, 64, 3}; //SCRIVERE FORMULA RISPARMIO MEMORIA
+  int net_topology[] = {4, 64, 2}; //SCRIVERE FORMULA RISPARMIO MEMORIA
   ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
   init_network(&net, num_layers, net_topology, activations);
 
