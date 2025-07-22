@@ -110,7 +110,7 @@ int main(void)
   init_network(&net, num_layers, net_topology, activations);
 
   Buffer buffer;
-  buffer_init(&buffer, 200, 3);
+  buffer_init(&buffer, 500, 3);
   uint32_t step_count = 0;
   uint32_t num_episode = 0;
   uint8_t done = 0;
