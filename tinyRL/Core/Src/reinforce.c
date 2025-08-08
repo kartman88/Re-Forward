@@ -1,8 +1,14 @@
 #include "reinforce.h"
 
+//CARTPOLE
 #define CART_LIMIT   2.4f                 /* ±2.4 m */
 #define POLE_LIMIT   0.20943951f          /* ±12°   */
 #define STEP_LIMIT   500
+
+//ACROBOT
+#define HEIGHT_THRESHOLD  1.0f
+
+
 
 static inline float frand(void) { return (float)rand() / RAND_MAX;}
 
@@ -78,7 +84,7 @@ int uart_send_action(UART_HandleTypeDef *huart, uint8_t action, uint8_t done, ui
 
 
 uint32_t sample_action(float *p, uint32_t dim){
-	const float EPSILON = 0.1f;               /* 1 % */
+	const float EPSILON = 0.0f;               /* 1 % */
 
 	/* ─── 1. esplorazione pura ogni tanto ─── */
 	float r = (float)rand() / (float)RAND_MAX; /* uniform [0,1) */
@@ -106,7 +112,7 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 
 int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t step, uint8_t *action){
 	uint32_t out_dim = net->layers[net->num_layers - 1].out_dim;
-	uint32_t dim = net->layers[0].in_dim;
+	//uint32_t dim = net->layers[0].in_dim;
 
 	//float *output_forward = malloc(out_dim * sizeof(float));
 	float output_forward[out_dim];
@@ -115,8 +121,8 @@ int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t step, uint8_t *action
 	if(!forward(net, obs, output_forward)) return 0;
 	uint32_t a = sample_action(output_forward, out_dim);
 	*action = a;
-	float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
-	store_step(buf, obs, a, r, step, dim);
+	//float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
+	//store_step(buf, obs, a, r, step, dim);
 
 	//free(output_forward);
 	return 1;
@@ -178,7 +184,7 @@ float evaluate_reward(float *obs){
 }
 */
 
-//CODE FOR CARTPOLE
+/*CODE FOR CARTPOLE*/
 uint8_t done_check(float *state, uint32_t step){
 	if (fabsf(state[0]) > CART_LIMIT) return 1;      //out of bound
 	if (fabsf(state[2]) > POLE_LIMIT) return 1;      //±12°
@@ -186,9 +192,46 @@ uint8_t done_check(float *state, uint32_t step){
 	return 0;
 }
 
-float evaluate_reward(float *obs){
+float evaluate_reward(float *state){
 	return 1.f;
 }
 
 
+/*CODE FOR ACROBOT
+uint8_t done_check(float *state, uint32_t step){
+	uint16_t a1 = 20;
+	uint16_t a2 = 10;
+	uint32_t goal1 = 0;
+	uint32_t goal2 = 180;
+	float cos1 = state[0];
+	float sin1 = state[1];
+	float cos2 = state[2];
+	float sin2 = state[3];
+	float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
+	float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
+	uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
+	uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
+	if((angle2_reached) || step>=500) return 1;
+	else return 0;
+}
+
+
+float evaluate_reward(float *state, uint32_t step){
+	int reward = -1;
+	uint16_t a1 = 20;
+	uint16_t a2 = 10;
+	uint32_t goal1 = 0;
+	uint32_t goal2 = 180;
+	float cos1 = state[0];
+	float sin1 = state[1];
+	float cos2 = state[2];
+	float sin2 = state[3];
+	float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
+	float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
+	uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
+	uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
+	if((angle2_reached) && (angle1_reached)) reward = reward + 100;
+	return reward;
+}
+*/
 

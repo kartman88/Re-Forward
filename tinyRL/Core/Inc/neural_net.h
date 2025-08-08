@@ -7,7 +7,7 @@
 #define BETA2 0.999f
 #define EPS_ADAM 1e-8f
 #define GAMMA 0.99f
-#define ENT_BETA 0.001f
+#define ENT_BETA 0.001f //0.001 good for cartpole
 #define MAX_STEPS 500
 
 typedef struct {

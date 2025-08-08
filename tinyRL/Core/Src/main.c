@@ -102,26 +102,33 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 
   srand(HAL_GetTick() ^ 0xA5A5A5A5);
+  int input_size = 4;
+  int output_size = 2;
+  int buffer_size = 500;
   //create neural network
   NeuralNet net;
   int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
-  int net_topology[] = {4, 64, 2}; //SCRIVERE FORMULA RISPARMIO MEMORIA
+  int net_topology[] = {input_size, 64, output_size}; //SCRIVERE FORMULA RISPARMIO MEMORIA
   ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
   init_network(&net, num_layers, net_topology, activations);
 
   Buffer buffer;
-  buffer_init(&buffer, 500, 3);
+  buffer_init(&buffer, buffer_size, input_size);
   uint32_t step_count = 0;
   uint32_t num_episode = 0;
   uint8_t done = 0;
   uint8_t action = 0;
-  float obs[4];
+  float obs[input_size];
+  uint8_t train = 1;
+
 
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 
   while (1){
 	if(uart_recv_floats(&huart2, obs, net_topology[0], 50)){
 		if(step(&buffer, &net, obs, step_count, &action)){
+			float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
+			store_step(&buffer, obs, action, r, step_count, net.layers[0].in_dim);
 			step_count++;
 			done = done_check(obs, step_count);
 			//send action with usart
@@ -129,14 +136,14 @@ int main(void)
 		}
 		if(done){
 			//finish episode
-			finish_episode(&buffer, &net, step_count);
+			if(train == 1) finish_episode(&buffer, &net, step_count);
 			//reset step counter and increase num of episode completed
 			step_count = 0;
 			num_episode++;
 		}
 
 	}
-	if(num_episode > 1000) return 0; //end training
+	if(num_episode > 200) train = 0; //end training
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

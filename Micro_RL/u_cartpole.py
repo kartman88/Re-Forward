@@ -11,7 +11,7 @@ PORT            = "/dev/ttyACM0"
 BAUDRATE        = 115200
 SER_TIMEOUT_S   = 0.05            # timeout per read della seriale
 SEND_PERIOD_MS  = 30              # ogni quanto riprovo a spedire (30 ms)
-MAX_WAIT_MS     = 150             # se in 150 ms non arriva risposta → ritrasmetto
+MAX_WAIT_MS     = 100             # se in 150 ms non arriva risposta → ritrasmetto
 GAMMA           = 0.99
 
 # ------------------------------------------------------------
@@ -65,7 +65,7 @@ def main():
     ser = serial.Serial(PORT, BAUDRATE, timeout=SER_TIMEOUT_S)
     print(f"[PC] Serial opened on {PORT} @ {BAUDRATE} baud")
 
-    env = gym.make("CartPole-v1", render_mode="human") #CartPole-v1 MountainCar-v0,
+    env = gym.make("CartPole-v1", render_mode="human") #CartPole-v1 MountainCar-v0, , render_mode="human"
 
     episode = 0
     obs, _  = env.reset()
@@ -104,8 +104,9 @@ def main():
                 obs, r, terminated, truncated, _ = env.step(action_to_env)
                 done = mcu_done  # or terminated or truncated
 
-                G    = r + GAMMA * G
+                G  = r + GAMMA * G
                 step += 1
+
 
             print(f"[PC] Episode {episode} finished in {step} steps, G≈{G:.2f}")
 

@@ -36,9 +36,11 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 //finish episode
 void finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count);
 
-//done function
+//done function cartpole
 uint8_t done_check(float *state, uint32_t step);
 //reward function
-float evaluate_reward(float *obs);
+float evaluate_reward(float *state);
+
+
 
 #endif
