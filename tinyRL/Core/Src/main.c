@@ -24,6 +24,7 @@
 #include "neural_net.h"
 #include "reinforce.h"
 #include <stdio.h>
+#include "utils.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,10 +54,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
-/*int _write(int fd, char* ptr, int len) {
-    HAL_UART_Transmit(&huart2, (uint8_t *) ptr, len, HAL_MAX_DELAY);
-    return len;
-}*/
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -95,7 +93,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  dwt_init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -108,7 +106,7 @@ int main(void)
   //create neural network
   NeuralNet net;
   int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
-  int net_topology[] = {input_size, 64, output_size}; //SCRIVERE FORMULA RISPARMIO MEMORIA
+  int net_topology[] = {input_size, 32, output_size}; //SCRIVERE FORMULA RISPARMIO MEMORIA
   ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
   init_network(&net, num_layers, net_topology, activations);
 
@@ -121,6 +119,10 @@ int main(void)
   float obs[input_size];
   uint8_t train = 1;
 
+  /*LOG VARIABLES*/
+  uint32_t t0 = 0; //HAL_GetTick()
+  uint32_t dt_ms = 0; //HAL_GetTick() - t0
+
 
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 
@@ -132,18 +134,21 @@ int main(void)
 			step_count++;
 			done = done_check(obs, step_count);
 			//send action with usart
-			uart_send_action(&huart2, action, done, 50, net_topology[0]);
+			uart_send_action(&huart2, action, done, 50);
 		}
 		if(done){
+			//t0 = HAL_GetTick();
 			//finish episode
-			if(train == 1) finish_episode(&buffer, &net, step_count);
+			if(train == 1) dt_ms = finish_episode(&buffer, &net, step_count);
+			//dt_ms = HAL_GetTick() - t0;
+			uart_send_log(&huart2, dt_ms, step_count, 50);
 			//reset step counter and increase num of episode completed
 			step_count = 0;
 			num_episode++;
 		}
 
 	}
-	if(num_episode > 200) train = 0; //end training
+	if(num_episode > MAX_EPISODE) train = 0; //end training
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

@@ -1,9 +1,10 @@
 #include "reinforce.h"
+#include "utils.h"
 
 //CARTPOLE
-#define CART_LIMIT   2.4f                 /* ±2.4 m */
-#define POLE_LIMIT   0.20943951f          /* ±12°   */
-#define STEP_LIMIT   500
+#define CART_LIMIT 2.4f                 /* ±2.4 m */
+#define POLE_LIMIT 0.20943951f          /* ±12°   */
+#define STEP_LIMIT 500
 
 //ACROBOT
 #define HEIGHT_THRESHOLD  1.0f
@@ -77,10 +78,29 @@ int uart_recv_floats(UART_HandleTypeDef *huart,
     return 1;
 }
 
-int uart_send_action(UART_HandleTypeDef *huart, uint8_t action, uint8_t done, uint32_t timeout, uint16_t obs_dim){
+int uart_send_action(UART_HandleTypeDef *huart, uint8_t action, uint8_t done, uint32_t timeout){
 	uint8_t frame[] = { 0x02, action, done, 0x03 };
 	return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
 }
+
+int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step, uint32_t timeout){
+	uint8_t frame[10];
+	frame[0] = 0x01; //STX
+
+	frame[1] = (uint8_t)(dt >> 24); //MSB
+	frame[2] = (uint8_t)(dt >> 16);
+	frame[3] = (uint8_t)(dt >>  8);
+	frame[4] = (uint8_t)(dt >>  0); //LSB
+
+	frame[5] = (uint8_t)(step >> 24);
+	frame[6] = (uint8_t)(step >> 16);
+	frame[7] = (uint8_t)(step >>  8);
+	frame[8] = (uint8_t)(step >>  0);
+
+	frame[9] = 0x04; //ETX
+	return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+}
+
 
 
 uint32_t sample_action(float *p, uint32_t dim){
@@ -128,9 +148,8 @@ int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t step, uint8_t *action
 	return 1;
 }
 
-void finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
-
-	if (step_count == 0) return; //no step in the buffer
+uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
+	if (step_count == 0) return 1; //no step in the buffer
 	//zero grad
 	zero_grad(net);
 	float *adv_buf = buf->advantage_buffer;
@@ -141,7 +160,7 @@ void finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
 		G = r + 0.99f * G;
 		adv_buf[t] = G;
 	}
-	//adv normalization
+	//adv normalization, REINFORCE with costant baseline
 	float mean = 0.0f;
 	for (int t = 0; t < step_count; ++t) mean += adv_buf[t];
 	mean /= step_count;
@@ -153,19 +172,31 @@ void finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
 	for (int t = 0; t < step_count; ++t) adv_buf[t] /= std;
 
 
-
+	//re-forward
 	for(int t = 0; t < step_count; ++t){
 		float *state = buf->state_buffer[t];
 		float r = buf->reward_buffer[t];
+		uint32_t t0 = dwt_ticks();
 		forward(net, state, NULL);
+
 		float adv = adv_buf[t];
 		uint32_t a = buf->action_buffer[t];
-		backward_pg(net, state, a, adv, r);
+
+
+		backward_pg(net, state, a, adv, r, step_count);
+
 	}
+	uint32_t dt = dwt_delta(t0, dwt_ticks());
 
 	//Normalize gradient
 	//gradient_norm_l2(net);
+
+
 	adam_optimizer(net);
+
+
+	dt = cycles_to_ns(dt);
+	return dt;
 }
 
 /*CODE FOR MOUNTAIN CAR
@@ -188,7 +219,9 @@ float evaluate_reward(float *obs){
 uint8_t done_check(float *state, uint32_t step){
 	if (fabsf(state[0]) > CART_LIMIT) return 1;      //out of bound
 	if (fabsf(state[2]) > POLE_LIMIT) return 1;      //±12°
-	if (step >= STEP_LIMIT) return 1;   //timeout
+	if (step >= STEP_LIMIT){
+		return 1;   //timeout
+	}
 	return 0;
 }
 

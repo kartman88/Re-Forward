@@ -1,0 +1,6 @@
+../Core/Src/utils.c:3:5:dwt_init	16	static,ignoring_inline_asm
+../Core/Src/utils.c:24:10:dwt_ticks	4	static
+../Core/Src/utils.c:29:10:dwt_delta	16	static
+../Core/Src/utils.c:33:10:cycles_to_ms	64	static
+../Core/Src/utils.c:37:10:cycles_to_us	80	static
+../Core/Src/utils.c:41:10:cycles_to_ns	48	static
