@@ -63,7 +63,7 @@ int forward(NeuralNet *net, float *input, float *output_final)
             default: break;
         }
 
-        //la uscita diventa input per il prossimo layer
+        //l'uscita diventa input per il prossimo layer
         curr_in = curr_out;
     }
 
@@ -130,12 +130,12 @@ void backward_core(NeuralNet *net, float *dout_last, float *input){
 	}
 }
 
-void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward){
+void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward, uint32_t step_count){
 	DenseLayer *last = &net->layers[net->num_layers - 1];
-	float *p   = last->out; //softmax prob.0
+	float *p = last->out; //softmax prob.0
 
 	//float *dlogit = malloc(last->out_dim * sizeof(float));
-	float dlogit[2];
+	float dlogit[last->out_dim];
 	for (int i = 0; i < last->out_dim; ++i){
 		float pi = fmaxf(p[i], 1e-6f); //clamp to avoid NaN values
 		float pg  = ((i == action) ? (1.f - pi) : - pi) * (advantage * reward);

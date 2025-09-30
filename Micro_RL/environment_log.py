@@ -3,8 +3,11 @@ import struct
 import serial
 import gymnasium as gym
 import numpy as np
+import random
 
 import matplotlib
+from sympy.core.random import randint
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
@@ -17,6 +20,9 @@ SER_TIMEOUT_S   = 0.05            # timeout per read della seriale
 SEND_PERIOD_MS  = 30              # ogni quanto riprovo a spedire (30 ms)
 MAX_WAIT_MS     = 100             # se in 150 ms non arriva risposta → ritrasmetto
 GAMMA           = 0.99
+
+SEED = 88 #88x, 89--9886, 90--99x, 80x, 376347--986, 88x, 666--987, 888-x, 887x, 111x
+n_experiment = 1
 
 # ------------------------------------------------------------
 #  TASK DIMENSIONS (scalabilità)
@@ -35,6 +41,8 @@ _ACTION_FRAME_LEN = 1 + ACTION_DIM + 4 + 1 + 1   # 0x02 + payload + ret + done +
 #LOG STRUCTURES
 time_list = []
 step_list = []
+episode_list = []
+reward_list = []
 
 # ------------------------------------------------------------
 #  SERIAL HELPERS
@@ -73,11 +81,11 @@ def recv_action_done(ser: serial.Serial):
         frame = ser.read(frame_len)
         if len(frame) == frame_len and frame[-1] == 0x04:
             dt = struct.unpack('>I', frame[0:4])[0]
-            dt = dt /1_000_000
+            dt = dt / 1000
             step = struct.unpack('>I', frame[4:8])[0]
             time_list.append(dt)
             step_list.append(step)
-            #print(f'time: {dt}, step: {step}')
+            print(f'time: {dt}, step: {step}')
 
     return None
 
@@ -85,13 +93,14 @@ def recv_action_done(ser: serial.Serial):
 #  MAIN LOOP
 # ------------------------------------------------------------
 def main():
+    global step_list, time_list, reward_list, episode_list
     ser = serial.Serial(PORT, BAUDRATE, timeout=SER_TIMEOUT_S)
     print(f"[PC] Serial opened on {PORT} @ {BAUDRATE} baud")
 
     env = gym.make("CartPole-v1") #CartPole-v1 MountainCar-v0, , render_mode="human"
 
     episode = 0
-    obs, _  = env.reset(seed=88) #88
+    obs, _  = env.reset(seed=SEED) #88
     state_sent   = False
     last_tx_ms   = 0.0
 
@@ -132,53 +141,81 @@ def main():
 
 
             print(f"[PC] Episode {episode} finished in {step} steps, G≈{G:.2f}")
+            episode_list.append(episode)
+            reward_list.append(step)
 
-            obs, _      = env.reset(seed=88) #88
+            obs, _ = env.reset(seed=SEED) #88
             state_sent  = False            # invierò subito il nuovo stato
+
+            if episode == 101:
+                break
 
     except KeyboardInterrupt:
         print("\n[PC] Interrupted by user")
 
     finally:
-        global step_list, time_list
+
         env.close()
         ser.close()
         print("[PC] Resources released, bye!")
+
         np.savetxt(
-            "finish_episode_time_complete.csv",
-            np.column_stack([step_list, time_list]),
+            f'learning_curve{n_experiment}.csv',
+            np.column_stack([episode_list, reward_list]),
             delimiter=",",
-            header="step,time",
+            header="episode,reward",
             comments="",
             fmt=["%d", "%d"]
         )
-        print(f'TEMPO MEDIO: {np.mean(time_list)}')
-
-        idx = np.argsort(step_list)
-        step_list = np.array(step_list)[idx]
-        time_list = np.array(time_list)[idx]
-        step_list, first_idx = np.unique(step_list, return_index=True)
-        time_list = time_list[first_idx]
-        np.savetxt(
-            "finish_episode_time_filtered.csv",
-            np.column_stack([step_list, time_list]),
-            delimiter=",",
-            header="step,time",
-            comments="",
-            fmt=["%d", "%d"]
-        )
-
         plt.figure()
-        plt.plot(step_list, time_list)
-        plt.xlabel('Number of Steps')
-        plt.ylabel('Time (ms)')
-        plt.title('Finish Episode Time')
+        plt.plot(episode_list, reward_list)
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.title('Learning Curve')
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
 
         # Salva l'immagine (PNG ad alta risoluzione)
-        plt.savefig('finish_episode_time.png', dpi=300)
+        plt.savefig(f'learning_curve{n_experiment}.png', dpi=300)
+        plt.close()
+
+
+        # np.savetxt(
+        #     "finish_episode_time_complete.csv",
+        #     np.column_stack([step_list, time_list]),
+        #     delimiter=",",
+        #     header="step,time",
+        #     comments="",
+        #     fmt=["%d", "%d"]
+        # )
+        # print(f'TEMPO MEDIO: {np.mean(time_list)}')
+        #
+        # idx = np.argsort(step_list)
+        # step_list = np.array(step_list)[idx]
+        # time_list = np.array(time_list)[idx]
+        # step_list, first_idx = np.unique(step_list, return_index=True)
+        # time_list = time_list[first_idx]
+        # np.savetxt(
+        #     "finish_episode_time_filtered.csv",
+        #     np.column_stack([step_list, time_list]),
+        #     delimiter=",",
+        #     header="step,time",
+        #     comments="",
+        #     fmt=["%d", "%d"]
+        # )
+        #
+        # plt.figure()
+        # plt.plot(step_list, time_list)
+        # plt.xlabel('Number of Steps')
+        # plt.ylabel('Time (ms)')
+        # plt.title('Finish Episode Time')
+        # plt.grid(True)
+        # plt.legend()
+        # plt.tight_layout()
+        #
+        # # Salva l'immagine (PNG ad alta risoluzione)
+        # plt.savefig('finish_episode_time.png', dpi=300)
 
 # ------------------------------------------------------------
 if __name__ == "__main__":

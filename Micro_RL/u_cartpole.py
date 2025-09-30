@@ -11,22 +11,51 @@ PORT            = "/dev/ttyACM0"
 BAUDRATE        = 115200
 SER_TIMEOUT_S   = 0.05            # timeout per read della seriale
 SEND_PERIOD_MS  = 30              # ogni quanto riprovo a spedire (30 ms)
-MAX_WAIT_MS     = 150             # se in 150 ms non arriva risposta → ritrasmetto
+MAX_WAIT_MS     = 100             # se in 150 ms non arriva risposta → ritrasmetto
 GAMMA           = 0.99
+
+# ------------------------------------------------------------
+#  TASK DIMENSIONS (scalabilità)
+# ------------------------------------------------------------
+#  Modifica questi due valori se cambi environment o protocollo
+OBS_DIM         = 4   # n° float32 da inviare al MCU (CartPole obs = 4)
+ACTION_DIM      = 1   # n° byte che il MCU invia come azione
+
+# Struct di pack per lo stato: "<4f" se OBS_DIM==4 ecc.
+_STATE_STRUCT   = f"<{OBS_DIM}f"
+_STATE_SIZE     = struct.calcsize(_STATE_STRUCT)
+
+# Numero di byte da ricevere in frame azione: start + ACTION_DIM + done + end
+_ACTION_FRAME_LEN = 1 + ACTION_DIM + 1 + 1   # 0x02 + payload + done + 0x03
 
 # ------------------------------------------------------------
 #  SERIAL HELPERS
 # ------------------------------------------------------------
 def send_state(ser: serial.Serial, obs: np.ndarray):
-    """Spedisce 4 float32 little-endian racchiusi tra 0x02 … 0x03"""
-    payload = struct.pack("<4f", *obs.astype(np.float32))
+    """
+    Invia OBS_DIM float32 little‑endian racchiusi tra 0x02 … 0x03
+    Frame: 0x02 <payload> 0x03
+    """
+    if obs.shape[-1] != OBS_DIM:
+        raise ValueError(f"Expected obs dim {OBS_DIM}, got {obs.shape[-1]}")
+    payload = struct.pack(_STATE_STRUCT, *obs.astype(np.float32))
     ser.write(b'\x02' + payload + b'\x03')
 
+
 def recv_action_done(ser: serial.Serial):
-    """Legge 4 byte: 0x02 <action> <done> 0x03.  Ritorna (action, done) o None"""
-    frame = ser.read(4)
-    if len(frame) == 4 and frame[0] == 0x02 and frame[3] == 0x03:
-        return frame[1], bool(frame[2])
+    """
+    Legge 0x02 <ACTION_DIM byte payload> <done flag> 0x03
+    Restituisce (actions, done) dove:
+        - actions è un int se ACTION_DIM==1, altrimenti una lista di int
+        - done    è bool
+    Se il frame è incompleto/errato → None
+    """
+    frame = ser.read(_ACTION_FRAME_LEN)
+    if len(frame) == _ACTION_FRAME_LEN and frame[0] == 0x02 and frame[-1] == 0x03:
+        action_bytes = frame[1:1 + ACTION_DIM]
+        actions = list(action_bytes)
+        done_flag = bool(frame[-2])
+        return (actions[0] if ACTION_DIM == 1 else actions, done_flag)
     return None
 
 # ------------------------------------------------------------
@@ -36,7 +65,7 @@ def main():
     ser = serial.Serial(PORT, BAUDRATE, timeout=SER_TIMEOUT_S)
     print(f"[PC] Serial opened on {PORT} @ {BAUDRATE} baud")
 
-    env = gym.make("CartPole-v1", render_mode="human")
+    env = gym.make("CartPole-v1", render_mode="human") #CartPole-v1 MountainCar-v0, , render_mode="human"
 
     episode = 0
     obs, _  = env.reset()
@@ -46,7 +75,7 @@ def main():
     try:
         while True:                        # ----- episodi -----
             step = 0
-            G    = 0.0
+            G  = 0.0
             done = False
             episode += 1
 
@@ -67,14 +96,17 @@ def main():
                     continue
 
                 # ---- frame valido ----
-                action, mcu_done = pkt
+                actions, mcu_done = pkt
                 state_sent = False                      # pronto per il prossimo stato
 
-                obs, r, terminated, truncated, _ = env.step(int(action))
-                done = mcu_done #or terminated or truncated
+                # Se l'ambiente richiede azione scalare usa actions altrimenti passa array
+                action_to_env = int(actions) if ACTION_DIM == 1 else np.array(actions)
+                obs, r, terminated, truncated, _ = env.step(action_to_env)
+                done = mcu_done  # or terminated or truncated
 
-                G    = r + GAMMA * G
+                G  = r + GAMMA * G
                 step += 1
+
 
             print(f"[PC] Episode {episode} finished in {step} steps, G≈{G:.2f}")
 

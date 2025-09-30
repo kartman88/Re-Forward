@@ -3,6 +3,6 @@
 ../Core/Src/neural_net.c:36:5:forward	56	static
 ../Core/Src/neural_net.c:76:6:zero_grad	24	static
 ../Core/Src/neural_net.c:85:6:backward_core	72	static
-../Core/Src/neural_net.c:133:6:backward_pg	64	static
+../Core/Src/neural_net.c:133:6:backward_pg	88	dynamic
 ../Core/Src/neural_net.c:149:6:adam_optimizer	56	static
 ../Core/Src/neural_net.c:174:6:gradient_norm_l2	64	static
