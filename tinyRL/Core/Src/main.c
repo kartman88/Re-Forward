@@ -128,10 +128,6 @@ int main(void)
   int temp = 0;
   while (1){
 	if(uart_recv_floats(&huart2, obs, net_topology[0], 50)){
-		if(temp == 0){
-			temp = 1;
-			//t0 = HAL_GetTick();
-		}
 		if(step(&buffer, &net, obs, step_count, &action)){
 			float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
 			store_step(&buffer, obs, action, r, step_count, net.layers[0].in_dim);
