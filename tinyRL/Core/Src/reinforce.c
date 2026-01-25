@@ -130,7 +130,7 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 }
 
 
-int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t step, uint8_t *action){
+int step(Buffer *buf, SharedBackbone *net, float *obs, uint32_t step, uint8_t *action){
 	uint32_t out_dim = net->layers[net->num_layers - 1].out_dim;
 	//uint32_t dim = net->layers[0].in_dim;
 
@@ -148,7 +148,7 @@ int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t step, uint8_t *action
 	return 1;
 }
 
-uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
+uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count){
 	if (step_count == 0) return 1; //no step in the buffer
 	//zero grad
 	zero_grad(net);

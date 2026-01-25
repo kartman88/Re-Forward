@@ -31,11 +31,11 @@ int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step, uint32_
 //sample action
 uint32_t sample_action(float *p, uint32_t action_dim);
 //step function
-int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t step, uint8_t *action);
+int step(Buffer *buf, SharedBackbone *net, float *obs, uint32_t step, uint8_t *action);
 //store step
 void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, uint32_t step, uint32_t obs_dim);
 //finish episode
-uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count);
+uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count);
 
 //done function cartpole
 uint8_t done_check(float *state, uint32_t step);

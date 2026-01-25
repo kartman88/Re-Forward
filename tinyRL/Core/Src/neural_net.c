@@ -3,16 +3,34 @@
 #include <string.h>
 #include <math.h>
 
-int init_network(NeuralNet *net, int num_layers, int *net_topology, ActivationType *activations){
+int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int num_layers_critic,
+		int *net_topology, int *net_topology_actor, int *net_topology_critic,
+		ActivationType *activations, ActivationType *activations_actor, ActivationType *activations_critic){
 	net->adam_t = 0;
     net->num_layers = num_layers;
     net->layers  = malloc(num_layers * sizeof(DenseLayer));
+
+    Head *actor = &net->actor;
+    actor->num_layers = num_layers_actor;
+    Head *critic = &net->critic;
+    critic->num_layers = num_layers_critic;
+
     if(net->layers == NULL) return 0;
 
-    for(int i = 0; i< net->num_layers; i++){
+    for(int i = 0; i < net->num_layers; i++){
         if(!dense_init(&net->layers[i], net_topology[i], net_topology[i+1], activations[i])) return 0;
         init_layer_params(&net->layers[i]);
     }
+
+    for(int i = 0; i < actor->num_layers; i++){
+    	if(!dense_init(&actor->layers[i], net_topology_actor[i], net_topology_actor[i+1], activations_actor[i])) return 0;
+		init_layer_params(&actor->layers[i]);
+	}
+
+    for(int i = 0; i < critic->num_layers; i++){
+    	if(!dense_init(&critic->layers[i], net_topology_critic[i], net_topology_critic[i+1], activations_critic[i])) return 0;
+		init_layer_params(&critic->layers[i]);
+	}
     return 1;
 }
 
@@ -33,7 +51,7 @@ void softmax(float *in, float *out, int n)
 	}
 }
 
-int forward(NeuralNet *net, float *input, float *output_final)
+int forward(SharedBackbone *net, float *input, float *output_final)
 {
     const float *curr_in  = input;
     float *curr_out = NULL;
@@ -73,7 +91,7 @@ int forward(NeuralNet *net, float *input, float *output_final)
     return 1;
 }
 
-void zero_grad(NeuralNet *net){
+void zero_grad(SharedBackbone *net){
 	//zero grad
 	for (int l = 0; l < net->num_layers; ++l) {
 		DenseLayer *ly = &net->layers[l];
@@ -82,7 +100,7 @@ void zero_grad(NeuralNet *net){
 	}
 }
 
-void backward_core(NeuralNet *net, float *dout_last, float *input){
+void backward_core(SharedBackbone *net, float *dout_last, float *input){
 	//backprop of the gradient
 	float *delta = dout_last;
 	float *prev = NULL;
@@ -130,7 +148,7 @@ void backward_core(NeuralNet *net, float *dout_last, float *input){
 	}
 }
 
-void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward, uint32_t step_count){
+void backward_pg(SharedBackbone *net, float *input, uint8_t action, float advantage, float reward, uint32_t step_count){
 	DenseLayer *last = &net->layers[net->num_layers - 1];
 	float *p = last->out; //softmax prob.0
 
@@ -146,7 +164,7 @@ void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, 
 	//free(dlogit);
 }
 
-void adam_optimizer(NeuralNet *net){
+void adam_optimizer(SharedBackbone *net){
 	//Adam update (ascent)
 	net->adam_t++;
 	const float b1t = 1.f - powf(BETA1, (float)net->adam_t);
@@ -171,7 +189,7 @@ void adam_optimizer(NeuralNet *net){
 	}
 }
 
-void gradient_norm_l2(NeuralNet *net){
+void gradient_norm_l2(SharedBackbone *net){
 	/* ---- gradient-norm (L2) ----------------------------------- */
 	float gnorm_sq = 0.f;
 

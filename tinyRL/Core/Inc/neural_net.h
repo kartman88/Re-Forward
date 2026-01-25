@@ -11,19 +11,28 @@
 #define MAX_EPISODE 100
 #define MAX_STEPS 500
 
-typedef struct {
-    DenseLayer *layers;
-    int num_layers;
-    uint32_t adam_t; //adam steps counter
-} NeuralNet;
+typedef struct{
+	DenseLayer *layers;
+	uint8_t num_layers;
+} Head;
 
-int init_network(NeuralNet *net, int num_layers, int *net_topology, ActivationType *activations);
+typedef struct{
+    DenseLayer *layers;
+    uint8_t num_layers;
+    uint32_t adam_t; //adam steps counter
+    Head actor;
+    Head critic;
+} SharedBackbone;
+
+int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int num_layers_critic,
+		int *net_topology, int *net_topology_actor, int *net_topology_critic,
+		ActivationType *activations, ActivationType *activations_actor, ActivationType *activations_critic);
 void softmax(float *in, float *out, int n);
-int forward(NeuralNet *net, float *input, float *output_final);
-void backward_core(NeuralNet *net, float *dout_last, float *input);
-void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward, uint32_t step_count);
-void adam_optimizer(NeuralNet *net);
-void gradient_norm_l2(NeuralNet *net);
-void zero_grad(NeuralNet *net);
+int forward(SharedBackbone *net, float *input, float *output_final);
+void backward_core(SharedBackbone *net, float *dout_last, float *input);
+void backward_pg(SharedBackbone *net, float *input, uint8_t action, float advantage, float reward, uint32_t step_count);
+void adam_optimizer(SharedBackbone *net);
+void gradient_norm_l2(SharedBackbone *net);
+void zero_grad(SharedBackbone *net);
 
 #endif

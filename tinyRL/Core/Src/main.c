@@ -102,56 +102,27 @@ int main(void)
   srand(HAL_GetTick() ^ 0xA5A5A5A5);
   int input_size = 4;
   int output_size = 2;
-  int buffer_size = 500;
   //create neural network
-  NeuralNet net;
-  int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
-  int net_topology[] = {input_size, 16, output_size}; //SCRIVERE FORMULA RISPARMIO MEMORIA
-  ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
-  init_network(&net, num_layers, net_topology, activations);
+  SharedBackbone net;
+  int num_layers = 1;
+  int num_layers_actor = 2;
+  int num_layers_critic = 2;
+  int net_topology[] = {input_size, 8};
+  int net_topology_actor[] = {8, 8, output_size};
+  int net_topology_critic[] = {8, 8, 1};
+  ActivationType activations[] = {ACT_RELU};
+  ActivationType activations_actor[] = {ACT_RELU, ACT_SOFTMAX};
+  ActivationType activations_critic[] = {ACT_RELU, ACT_NONE};
+  int is_ok = init_network(&net, num_layers, num_layers_actor, num_layers_critic,
+		  net_topology, net_topology_actor, net_topology_critic,
+		  activations, activations_actor, activations_critic);
 
-  Buffer buffer;
-  buffer_init(&buffer, buffer_size, input_size);
-  uint32_t step_count = 0;
-  uint32_t num_episode = 0;
-  uint8_t done = 0;
-  uint8_t action = 0;
-  float obs[input_size];
-  uint8_t train = 1;
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+  if(is_ok) HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+  else HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
 
-  /*LOG VARIABLES*/
-  uint32_t t0 = 0; //dwt_ticks();
-  uint32_t dt_ms = 0; //dwt_delta(t0, dwt_ticks());
-
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-
-  int temp = 0;
   while (1){
-	if(uart_recv_floats(&huart2, obs, net_topology[0], 50)){
-		if(step(&buffer, &net, obs, step_count, &action)){
-			float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
-			store_step(&buffer, obs, action, r, step_count, net.layers[0].in_dim);
-			step_count++;
-			done = done_check(obs, step_count);
-			//send action with usart
-			uart_send_action(&huart2, action, done, 50);
-		}
-		if(done){ //finish episode
-			if(train == 1) finish_episode(&buffer, &net, step_count);
-			//dt_ms = HAL_GetTick() - t0;
-			//uart_send_log(&huart2, dt_ms, step_count, 50);
-			//reset step counter and increase num of episode completed
-			step_count = 0;
-			num_episode++;
-		}
-
-	}
-	if(num_episode >= MAX_EPISODE){
-		train = 0; //end training
-		//dt_ms = HAL_GetTick() - t0;
-		//uart_send_log(&huart2, dt_ms, step_count, 50);
-		break;
-	}
+	printf("FUNZIONA!!!");
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
