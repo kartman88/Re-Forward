@@ -34,34 +34,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := H7_project
+BUILD_ARTIFACT_NAME := tinyRL
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-H7_project.elf \
+tinyRL.elf \
 
 MAP_FILES += \
-H7_project.map \
+tinyRL.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-H7_project.list \
+tinyRL.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: H7_project.elf secondary-outputs
+main-build: tinyRL.elf secondary-outputs
 
 # Tool invocations
-H7_project.elf H7_project.map: $(OBJS) $(USER_OBJS) /home/tano/STM32CubeIDE/workspace_1.19.0/H7_project/STM32H743ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "H7_project.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"/home/tano/STM32CubeIDE/workspace_1.19.0/H7_project/STM32H743ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="H7_project.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+tinyRL.elf tinyRL.map: $(OBJS) $(USER_OBJS) /home/tano/Desktop/Code/Re-Forward/tinyRL/STM32H743ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "tinyRL.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"/home/tano/Desktop/Code/Re-Forward/tinyRL/STM32H743ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="tinyRL.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -70,14 +70,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-H7_project.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "H7_project.list"
+tinyRL.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "tinyRL.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) H7_project.elf H7_project.list H7_project.map default.size.stdout
+	-$(RM) default.size.stdout tinyRL.elf tinyRL.list tinyRL.map
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)
