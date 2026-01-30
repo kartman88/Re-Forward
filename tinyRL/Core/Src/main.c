@@ -126,14 +126,31 @@ int main(void)
   if(is_ok) HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
   else HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
   float input[] = {0.1, 0.0, 0.2, 0.4};
-  float output_actor[4];
-  float output_critic[1];
-  int forward_ok = forward(&net, input, output_actor, output_critic);
+  uint8_t action = 0;
+  int step_ok = 0;
 
-  while (1)
-  {
-	  if(forward_ok) HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
-	  else HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
+  while (1){
+	  step(&net, input, &action);
+	  if(action == 0){
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+		  for(int i = 0; i < 3; i++){
+			  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
+			  HAL_Delay(200);
+		  }
+
+	  }
+	  if(action == 1){
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+		  for (int i = 0; i < 3; i++){
+			  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
+			  HAL_Delay(200);
+		  }
+
+	  }
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
 	  HAL_Delay(500);
     /* USER CODE END WHILE */
 

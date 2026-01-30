@@ -130,7 +130,7 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 }
 
 
-int step(Buffer *buf, SharedBackbone *net, float *obs, uint32_t step, uint8_t *action){
+int step(SharedBackbone *net, float *obs, uint8_t *action){
 	Head *actor = &net->actor;
 	Head *critic = &net->critic;
 	uint32_t out_dim_actor = actor->layers[actor->num_layers - 1].out_dim;
