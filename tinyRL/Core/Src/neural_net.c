@@ -59,13 +59,15 @@ void softmax(float *in, float *out, int n)
 	}
 }
 
-int forward(SharedBackbone *net, float *input, float *output_final)
+int forward(SharedBackbone *net, float *input, float *output_actor, float *output_critic)
 {
     const float *curr_in  = input;
     float *curr_out = NULL;
 
-    for (int l = 0; l < net->num_layers; ++l) {
+    Head *actor = &net->actor;
+    Head *critic = &net->critic;
 
+    for (int l = 0; l < net->num_layers + 1; ++l) { //+1 because we have to manage the last layer that goes into actor/critic
         DenseLayer *layer = &net->layers[l];
         curr_out = layer->out; //pointer to layer's output
 
@@ -89,12 +91,75 @@ int forward(SharedBackbone *net, float *input, float *output_final)
             default: break;
         }
 
-        //l'uscita diventa input per il prossimo layer
+        //the output become the input for the next layer
         curr_in = curr_out;
     }
+    float *backbone_out = curr_out; //save the backbone output to use it on both actor and critic
+
+    //-----ACTOR FORWARD-----
+    for (int l = 0; l < actor->num_layers; ++l){
+    	DenseLayer *layer = &actor->layers[l];
+		curr_out = layer->out; //pointer to layer's output
+
+		// fully connected product W·x + b
+		for (int i = 0; i < layer->out_dim; ++i) {
+			float acc = layer->b[i];
+			for (int j = 0; j < layer->in_dim; ++j)
+				acc += layer->W[i][j] * curr_in[j];
+			curr_out[i] = acc; //logit
+		}
+
+		//activation
+		switch (layer->activation) {
+			case ACT_RELU:
+				for (int i = 0; i < layer->out_dim; ++i)
+					if (curr_out[i] < 0.f) curr_out[i] = 0.f;
+			break;
+			case ACT_SOFTMAX:
+				softmax(curr_out, curr_out, layer->out_dim);
+			break;
+			default: break;
+		}
+
+            //the output become the input for the next layer
+		curr_in = curr_out;
+	}
+    //copy the final output
+	if(output_actor) memcpy(output_actor, curr_out, actor->layers[actor->num_layers-1].out_dim * sizeof(float));
+
+    //-----CRITIC FORWARD-----
+    curr_in = backbone_out; //restore the backbone output as input for the critic
+    for (int l = 0; l < actor->num_layers; ++l){
+    	DenseLayer *layer = &actor->layers[l];
+    	curr_out = layer->out; //pointer to layer's output
+
+		// fully connected product W·x + b
+		for (int i = 0; i < layer->out_dim; ++i) {
+			float acc = layer->b[i];
+			for (int j = 0; j < layer->in_dim; ++j)
+				acc += layer->W[i][j] * curr_in[j];
+			curr_out[i] = acc; //logit
+		}
+
+		//activation
+		switch (layer->activation) {
+			case ACT_RELU:
+				for (int i = 0; i < layer->out_dim; ++i)
+					if (curr_out[i] < 0.f) curr_out[i] = 0.f;
+			break;
+			case ACT_SOFTMAX:
+				softmax(curr_out, curr_out, layer->out_dim);
+			break;
+			default: break;
+		}
+
+                //the output become the input for the next layer
+		curr_in = curr_out;
+	}
+
 
     //copy the final output
-    if(output_final) memcpy(output_final, curr_out, net->layers[net->num_layers-1].out_dim * sizeof(float));
+    if(output_critic) memcpy(output_critic, curr_out, critic->layers[critic->num_layers-1].out_dim * sizeof(float));
 
     return 1;
 }

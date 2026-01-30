@@ -131,15 +131,19 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 
 
 int step(Buffer *buf, SharedBackbone *net, float *obs, uint32_t step, uint8_t *action){
-	uint32_t out_dim = net->layers[net->num_layers - 1].out_dim;
+	Head *actor = &net->actor;
+	Head *critic = &net->critic;
+	uint32_t out_dim_actor = actor->layers[actor->num_layers - 1].out_dim;
+	uint32_t out_dim_critic = critic->layers[critic->num_layers - 1].out_dim;
 	//uint32_t dim = net->layers[0].in_dim;
 
 	//float *output_forward = malloc(out_dim * sizeof(float));
-	float output_forward[out_dim];
+	float output_actor[out_dim_actor];
+	float output_critic[out_dim_critic];
 	//if (!output_forward) return 0; //no RAM available
 
-	if(!forward(net, obs, output_forward)) return 0;
-	uint32_t a = sample_action(output_forward, out_dim);
+	if(!forward(net, obs, output_actor, output_critic)) return 0;
+	uint32_t a = sample_action(output_actor, out_dim_actor);
 	*action = a;
 	//float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
 	//store_step(buf, obs, a, r, step, dim);
@@ -177,7 +181,7 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count){
 		float *state = buf->state_buffer[t];
 		float r = buf->reward_buffer[t];
 
-		forward(net, state, NULL);
+		forward(net, state, NULL, NULL);
 
 		float adv = adv_buf[t];
 		uint32_t a = buf->action_buffer[t];
