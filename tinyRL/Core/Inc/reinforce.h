@@ -1,7 +1,7 @@
 #ifndef REINFORCE_H
 #define REINFORCE_H
 
-#include "stm32f4xx_hal.h"
+#include "stm32h7xx_hal.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>

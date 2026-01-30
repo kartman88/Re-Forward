@@ -7,13 +7,18 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int 
 		int *net_topology, int *net_topology_actor, int *net_topology_critic,
 		ActivationType *activations, ActivationType *activations_actor, ActivationType *activations_critic){
 	net->adam_t = 0;
-    net->num_layers = num_layers;
     net->layers  = malloc(num_layers * sizeof(DenseLayer));
+    num_layers--; //there are num_layers-1 set of weight
+    net->num_layers = num_layers;
 
     Head *actor = &net->actor;
+    num_layers_actor--;
     actor->num_layers = num_layers_actor;
+    actor->layers = malloc(num_layers_actor * sizeof(DenseLayer));
     Head *critic = &net->critic;
+    num_layers_critic--;
     critic->num_layers = num_layers_critic;
+    critic->layers = malloc(num_layers_critic * sizeof(DenseLayer));
 
     if(net->layers == NULL) return 0;
 
@@ -21,6 +26,9 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int 
         if(!dense_init(&net->layers[i], net_topology[i], net_topology[i+1], activations[i])) return 0;
         init_layer_params(&net->layers[i]);
     }
+
+    if(!dense_init(&net->layers[num_layers], net_topology[num_layers], net_topology_actor[0], activations[num_layers])) return 0;
+    init_layer_params(&net->layers[num_layers]);
 
     for(int i = 0; i < actor->num_layers; i++){
     	if(!dense_init(&actor->layers[i], net_topology_actor[i], net_topology_actor[i+1], activations_actor[i])) return 0;
