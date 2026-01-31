@@ -224,12 +224,20 @@ void normalize_advantage(Buffer *buf, uint32_t step_count){
 
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
 	if (step_count == 0) return 1; //no step in the buffer
-	//zero grad
-	zero_grad(net);
-
+	//Evaluate advantages and normalize
 	evaluate_return(buf, step_count, done);
 	evaluate_advantages(buf, step_count);
 	normalize_advantage(buf, step_count);
+
+	//zero grad
+	zero_grad(net); //TODO
+
+	//Re-Forward + PPO
+	for(int epoch =  0; epoch < N_EPOCHS; epoch++){
+		for(int t = 0; t < step_count; t++){
+
+		}
+	}
 
 
 	return 1;

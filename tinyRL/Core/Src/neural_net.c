@@ -7,29 +7,32 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int 
 		int *net_topology, int *net_topology_actor, int *net_topology_critic,
 		ActivationType *activations, ActivationType *activations_actor, ActivationType *activations_critic){
 	net->adam_t = 0;
-    net->layers  = malloc(num_layers * sizeof(DenseLayer));
-    num_layers--; //there are num_layers-1 set of weight
+    net->layers  = malloc(num_layers * sizeof(DenseLayer)); //should be num_layers +1 because we have separate actor critic layers
+    num_layers--; //there are num_layers-1 set of weight MAYBE I DON'T NEED THIS BECAUSE I WILL HAVE 2 SET OF WEIGHTS AS OUT
     net->num_layers = num_layers;
 
     Head *actor = &net->actor;
-    num_layers_actor--;
+    num_layers_actor--; //there are num_layers-1 set of weight
     actor->num_layers = num_layers_actor;
     actor->layers = malloc(num_layers_actor * sizeof(DenseLayer));
     Head *critic = &net->critic;
-    num_layers_critic--;
+    num_layers_critic--; //there are num_layers-1 set of weight
     critic->num_layers = num_layers_critic;
     critic->layers = malloc(num_layers_critic * sizeof(DenseLayer));
 
     if(net->layers == NULL) return 0;
 
+    //We do num_layer -1 inside the loop and 1 outside so the total set of weights will be num_layer
     for(int i = 0; i < net->num_layers; i++){
         if(!dense_init(&net->layers[i], net_topology[i], net_topology[i+1], activations[i])) return 0;
         init_layer_params(&net->layers[i]);
     }
-
+    //This one is out of the loop because connect the shared backbone to the actor/critic
     if(!dense_init(&net->layers[num_layers], net_topology[num_layers], net_topology_actor[0], activations[num_layers])) return 0;
     init_layer_params(&net->layers[num_layers]);
+    //SHOULD ADD THE CRITIC TOO
 
+    //SHOULD FIX THIS TO PICK THE CORRECT OUTPUT FROM THE SHARED BACKBONE
     for(int i = 0; i < actor->num_layers; i++){
     	if(!dense_init(&actor->layers[i], net_topology_actor[i], net_topology_actor[i+1], activations_actor[i])) return 0;
 		init_layer_params(&actor->layers[i]);
@@ -166,7 +169,7 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
 
 void zero_grad(SharedBackbone *net){
 	//zero grad
-	for (int l = 0; l < net->num_layers; ++l) {
+	for (int l = 0; l < net->num_layers; l++) {
 		DenseLayer *ly = &net->layers[l];
 		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
 		memset(ly->db   , 0, ly->out_dim * sizeof(float));

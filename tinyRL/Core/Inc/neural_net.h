@@ -11,6 +11,11 @@
 #define MAX_EPISODE 100
 #define MAX_STEPS 500
 
+#define N_EPOCHS 3
+#define EPS_CLIPPING 0.2f
+#define VALUE_W 0.5F
+#define ENTROPY_W 0.01
+
 typedef struct{
 	DenseLayer *layers;
 	uint8_t num_layers;
