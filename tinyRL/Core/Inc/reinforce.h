@@ -38,7 +38,10 @@ int step(SharedBackbone *net, float *obs, uint8_t *action, float *reward, uint8_
 void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, float log_prob, float output_critic, uint32_t step_count, uint32_t obs_dim, uint8_t done);
 //finish episode
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done);
-
+//evaluate returns and advantages
+void evaluate_return(Buffer *buf, uint32_t step_count, uint8_t done);
+void evaluate_advantages(Buffer *buf, uint32_t step_count);
+void normalize_advantage(Buffer *buf, uint32_t step_count);
 //done function cartpole
 uint8_t done_check(float *state, uint32_t step);
 //reward function

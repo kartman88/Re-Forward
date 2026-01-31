@@ -5,7 +5,9 @@
 ../Core/Src/reinforce.c:109:10:sample_action	4
 ../Core/Src/reinforce.c:128:6:store_step	3
 ../Core/Src/reinforce.c:144:5:step	6
-../Core/Src/reinforce.c:189:6:evaluate_return	3
-../Core/Src/reinforce.c:200:10:finish_episode	8
-../Core/Src/reinforce.c:266:9:done_check	4
-../Core/Src/reinforce.c:275:7:evaluate_reward	1
+../Core/Src/reinforce.c:189:6:evaluate_return	2
+../Core/Src/reinforce.c:200:6:evaluate_advantages	2
+../Core/Src/reinforce.c:209:6:normalize_advantage	6
+../Core/Src/reinforce.c:225:10:finish_episode	2
+../Core/Src/reinforce.c:304:9:done_check	4
+../Core/Src/reinforce.c:313:7:evaluate_reward	1

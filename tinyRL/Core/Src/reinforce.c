@@ -156,7 +156,7 @@ int step(SharedBackbone *net, float *obs, uint8_t *action, float *reward,
 	float log_prob = 0.f;
 	//if (!output_forward) return 0; //no RAM available
 
-	if(step_count != 0) *reward = evaluate_reward(obs); //reward will not be stored for the first step
+	if(*step_count != 0) *reward = evaluate_reward(obs); //reward will not be stored for the first step
 	//CHECK DONE BEFORE WASTING TIME SELECTING AN ACTION
 	*done = done_check(obs, *step_count);
 	if(*done == 1){ //Truncated so we do the last forward to check the potential of that state
@@ -182,7 +182,7 @@ int step(SharedBackbone *net, float *obs, uint8_t *action, float *reward,
 	//-----STORE STEP IN BUFFER-----
 	store_step(buffer, obs, *action, *reward, log_prob, output_critic[0], *step_count, net->layers[0].in_dim, *done);
 	//free(output_forward);
-	step_count++;
+	*step_count = *step_count + 1;
 	return 1;
 }
 
@@ -197,13 +197,42 @@ void evaluate_return(Buffer *buf, uint32_t step_count, uint8_t done){
 	}
 }
 
+void evaluate_advantages(Buffer *buf, uint32_t step_count){
+	float *adv_buf = buf->advantage_buffer;
+	float *value_buf = buf->critic_buffer;
+	for(int t = 0; t < step_count; t++){
+		float A = adv_buf[t] - value_buf[t];
+		adv_buf[t] = A;
+	}
+}
+
+void normalize_advantage(Buffer *buf, uint32_t step_count){
+	if(step_count > 2){
+		float *adv_buf = buf->advantage_buffer;
+		//adv normalization
+		float mean = 0.0f;
+		for (int t = 0; t < step_count; t++) mean += adv_buf[t];
+		mean /= step_count;
+		for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
+
+		float var = 0.0f;
+		for (int t = 0; t < step_count; t++) var += adv_buf[t] * adv_buf[t];
+		float std = sqrtf(var / step_count) + 1e-6f;
+		for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
+	}
+}
+
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
 	if (step_count == 0) return 1; //no step in the buffer
 	//zero grad
 	zero_grad(net);
 
-	float *adv_buf = buf->advantage_buffer;
 	evaluate_return(buf, step_count, done);
+	evaluate_advantages(buf, step_count);
+	normalize_advantage(buf, step_count);
+
+
+	return 1;
 }
 
 /*uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count){

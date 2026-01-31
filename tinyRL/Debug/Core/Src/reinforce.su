@@ -6,6 +6,8 @@
 ../Core/Src/reinforce.c:128:6:store_step	40	static
 ../Core/Src/reinforce.c:144:5:step	120	dynamic
 ../Core/Src/reinforce.c:189:6:evaluate_return	40	static
-../Core/Src/reinforce.c:200:10:finish_episode	88	static
-../Core/Src/reinforce.c:266:9:done_check	16	static
-../Core/Src/reinforce.c:275:7:evaluate_reward	16	static
+../Core/Src/reinforce.c:200:6:evaluate_advantages	32	static
+../Core/Src/reinforce.c:209:6:normalize_advantage	48	static
+../Core/Src/reinforce.c:225:10:finish_episode	24	static
+../Core/Src/reinforce.c:304:9:done_check	16	static
+../Core/Src/reinforce.c:313:7:evaluate_reward	16	static
