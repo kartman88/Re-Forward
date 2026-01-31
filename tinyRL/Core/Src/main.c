@@ -103,7 +103,9 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  //random seed to generate initial weight
   srand(HAL_GetTick() ^ 0xA5A5A5A5);
+  //-----NETWORK PARAMETERS AND CREATION-----
   int input_size = 4;
   int output_size = 2;
   //create neural network
@@ -121,37 +123,38 @@ int main(void)
 		  	  net_topology, net_topology_actor, net_topology_critic,
 			  activations, activations_actor, activations_critic);
 
+  //-----BUFFER PARAMETER AND CREATION-----
+  Buffer buffer;
+  int buffer_size = 1000;
+  buffer_init(&buffer, buffer_size, input_size);
+  uint32_t step_count = 0;
+  uint32_t num_episode = 0;
+  uint8_t done = 0;
+  uint8_t action = 0;
+  float reward = 0;
+  float obs[input_size];
+  uint8_t train = 1;
+
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
   if(is_ok) HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
   else HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-  float input[] = {0.1, 0.0, 0.2, 0.4};
-  uint8_t action = 0;
-  int step_ok = 0;
 
   while (1){
-	  step(&net, input, &action);
-	  if(action == 0){
-		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-		  for(int i = 0; i < 3; i++){
-			  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
-			  HAL_Delay(200);
+	  if(uart_recv_floats(&huart3, obs, net_topology[0], 50)){
+		  if(step(&net, obs, &action, &reward, &done, &step_count, &buffer)){
+			  uart_send_action(&huart3, action, done, 50);
 		  }
-
-	  }
-	  if(action == 1){
-		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-		  for (int i = 0; i < 3; i++){
-			  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
-			  HAL_Delay(200);
+		  if(done){
+			  if(train == 1) finish_episode(&buffer, &net, step_count, done); //TODO
+			  step_count = 0;
+			  num_episode++;
 		  }
-
 	  }
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-	  HAL_Delay(500);
+	  if(num_episode > MAX_EPISODE){
+		  train = 0;
+		  break;
+	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
