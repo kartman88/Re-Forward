@@ -8,6 +8,7 @@
 #define EPS_ADAM 1e-8f
 #define GAMMA 0.99f
 #define ENT_BETA 0.01f //0.001 good for cartpole
+#define CRIT_LOSS 0.5
 #define MAX_EPISODE 100
 #define MAX_STEPS 500
 

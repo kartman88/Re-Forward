@@ -40,7 +40,7 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done);
 //evaluate returns and advantages
 void evaluate_return(Buffer *buf, uint32_t step_count, uint8_t done);
-void evaluate_advantages(Buffer *buf, uint32_t step_count);
+float evaluate_advantages(float ret, float value, float mean, float std);
 void normalize_advantage(Buffer *buf, uint32_t step_count);
 //done function cartpole
 uint8_t done_check(float *state, uint32_t step);

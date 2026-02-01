@@ -30,7 +30,8 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int 
     //This one is out of the loop because connect the shared backbone to the actor/critic
     if(!dense_init(&net->layers[num_layers], net_topology[num_layers], net_topology_actor[0], activations[num_layers])) return 0;
     init_layer_params(&net->layers[num_layers]);
-    //SHOULD ADD THE CRITIC TOO
+
+    //Critic connection init
     if(!dense_init(&net->layers[num_layers+1], net_topology[num_layers], net_topology_critic[0], activations[num_layers])) return 0;
 	init_layer_params(&net->layers[num_layers+1]);
 
@@ -69,12 +70,14 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
 {
     const float *curr_in  = input;
     float *curr_out = NULL;
+    DenseLayer *layer = NULL;
 
     Head *actor = &net->actor;
     Head *critic = &net->critic;
 
-    for (int l = 0; l < net->num_layers + 1; ++l) { //+1 because we have to manage the last layer NEED TO MODIFY THIS AND MANAGE SEPARATELY THE LAST 2 OUT
-        DenseLayer *layer = &net->layers[l];
+    //SHARED BACKBONE FORWARD
+    for (int l = 0; l < net->num_layers; ++l){ //+1 because we have to manage the last layer NEED TO MODIFY THIS AND MANAGE SEPARATELY THE LAST 2 OUT
+        layer = &net->layers[l];
         curr_out = layer->out; //pointer to layer's output
 
         // fully connected product W·x + b
@@ -101,6 +104,34 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
         curr_in = curr_out;
     }
     float *backbone_out = curr_out; //save the backbone output to use it on both actor and critic
+
+    //Evaluate output for actor before starting the loop
+    layer = &net->layers[net->num_layers];
+	curr_out = layer->out; //pointer to layer's output
+
+	// fully connected product W·x + b
+	for (int i = 0; i < layer->out_dim; ++i) {
+		float acc = layer->b[i];
+		for (int j = 0; j < layer->in_dim; ++j)
+			acc += layer->W[i][j] * backbone_out[j];
+		curr_out[i] = acc; //logit
+	}
+
+	//activation
+	switch (layer->activation) {
+		case ACT_RELU:
+			for (int i = 0; i < layer->out_dim; ++i)
+				if (curr_out[i] < 0.f) curr_out[i] = 0.f;
+		break;
+		case ACT_SOFTMAX:
+			softmax(curr_out, curr_out, layer->out_dim);
+		break;
+		default: break;
+	}
+
+            //the output become the input for the next layer
+	curr_in = curr_out;
+
 
     //-----ACTOR FORWARD-----
     for (int l = 0; l < actor->num_layers; ++l){
@@ -130,11 +161,39 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
             //the output become the input for the next layer
 		curr_in = curr_out;
 	}
+
     //copy the final output
 	if(output_actor) memcpy(output_actor, curr_out, actor->layers[actor->num_layers-1].out_dim * sizeof(float));
 
+
     //-----CRITIC FORWARD-----
-    curr_in = backbone_out; //restore the backbone output as input for the critic
+	//Evaluate output for critic before starting the loop
+	layer = &net->layers[net->num_layers + 1]; //+1 to get  the critic
+	curr_out = layer->out; //pointer to layer's output
+
+	// fully connected product W·x + b
+	for (int i = 0; i < layer->out_dim; ++i) {
+		float acc = layer->b[i];
+		for (int j = 0; j < layer->in_dim; ++j)
+			acc += layer->W[i][j] * backbone_out[j];
+		curr_out[i] = acc; //logit
+	}
+
+	//activation
+	switch (layer->activation) {
+		case ACT_RELU:
+			for (int i = 0; i < layer->out_dim; ++i)
+				if (curr_out[i] < 0.f) curr_out[i] = 0.f;
+		break;
+		case ACT_SOFTMAX:
+			softmax(curr_out, curr_out, layer->out_dim);
+		break;
+		default: break;
+	}
+
+	//the output become the input for the next layer
+	curr_in = curr_out;
+
     for (int l = 0; l < actor->num_layers; ++l){
     	DenseLayer *layer = &actor->layers[l];
     	curr_out = layer->out; //pointer to layer's output
@@ -171,9 +230,25 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
 }
 
 void zero_grad(SharedBackbone *net){
-	//zero grad
-	for (int l = 0; l < net->num_layers; l++) {
+	Head *actor = &net->actor;
+	Head *critic = &net->critic;
+	//zero grad shared backbone
+	for (int l = 0; l < net->num_layers + 2; l++){ //+2 to zero also the actor and critic starting
 		DenseLayer *ly = &net->layers[l];
+		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
+		memset(ly->db   , 0, ly->out_dim * sizeof(float));
+	}
+
+	//zero grad actor
+	for (int l = 0; l < actor->num_layers; l++){ //+2 to zero also the actor and critic starting
+		DenseLayer *ly = &actor->layers[l];
+		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
+		memset(ly->db   , 0, ly->out_dim * sizeof(float));
+	}
+
+	//zero grad actor
+	for (int l = 0; l < critic->num_layers; l++){ //+2 to zero also the actor and critic starting
+		DenseLayer *ly = &critic->layers[l];
 		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
 		memset(ly->db   , 0, ly->out_dim * sizeof(float));
 	}

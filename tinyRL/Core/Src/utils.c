@@ -1,5 +1,11 @@
 #include "utils.h"
 
+float clip(float value, float range_min, float range_max){
+	if(value > range_max) value = range_max;
+	if(value < range_min) value = range_min;
+	return value;
+}
+
 int dwt_init(void){
     /* Abilita il blocco di trace */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;

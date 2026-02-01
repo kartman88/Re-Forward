@@ -149,23 +149,6 @@ int main(void)
 		  }
 		  if(done == 1 || done == 2){
 			  if(train == 1) finish_episode(&buffer, &net, step_count, done); //TODO
-			  float *adv_buf = buffer.advantage_buffer;
-			  for(int i = 0; i < step_count; i++){
-				  if(adv_buf[i] > 0){
-					  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
-					  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-					  HAL_Delay(500);
-					  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-					  HAL_Delay(200);
-				  }
-				  else{
-					  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-					  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-					  HAL_Delay(500);
-					  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-					  HAL_Delay(200);
-				  }
-			  }
 			  step_count = 0;
 			  num_episode++;
 		  }

@@ -195,47 +195,96 @@ void evaluate_return(Buffer *buf, uint32_t step_count, uint8_t done){
 		G = r + GAMMA * G;
 		adv_buf[t] = G;
 	}
-}
+	//normalize returns
+	if(step_count > 2){
+		float mean = 0.0f;
+		for (int t = 0; t < step_count; t++) mean += adv_buf[t];
+			mean /= step_count;
+		for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
 
-void evaluate_advantages(Buffer *buf, uint32_t step_count){
-	float *adv_buf = buf->advantage_buffer;
-	float *value_buf = buf->critic_buffer;
-	for(int t = 0; t < step_count; t++){
-		float A = adv_buf[t] - value_buf[t];
-		adv_buf[t] = A;
+		float var = 0.0f;
+		for (int t = 0; t < step_count; t++) var += adv_buf[t] * adv_buf[t];
+			float std = sqrtf(var / step_count) + 1e-6f;
+		for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
 	}
 }
 
-void normalize_advantage(Buffer *buf, uint32_t step_count){
+float evaluate_advantages(float ret, float value, float mean, float std){
+	float A = ret - value;
+	A -= mean;
+	A /= std;
+	return A;
+}
+
+void evaluate_mean_std(Buffer *buf, uint32_t step_count, float *m, float *s){
 	if(step_count > 2){
 		float *adv_buf = buf->advantage_buffer;
 		//adv normalization
 		float mean = 0.0f;
 		for (int t = 0; t < step_count; t++) mean += adv_buf[t];
-		mean /= step_count;
-		for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
+			mean /= step_count;
+		*m = mean;
+		//for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
 
 		float var = 0.0f;
 		for (int t = 0; t < step_count; t++) var += adv_buf[t] * adv_buf[t];
-		float std = sqrtf(var / step_count) + 1e-6f;
-		for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
+			float std = sqrtf(var / step_count) + 1e-6f;
+		*s = std;
+		//for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
 	}
+}
+
+float evaluate_entropy(float *probs, int n_actions){
+	float entropy = 0.0f;
+	for (int i = 0; i < n_actions; i++){
+		if (probs[i] > 1e-8f) { // Avoid log(0) that is -inf
+			entropy -= probs[i] * logf(probs[i]);
+	    }
+	}
+	return entropy;
 }
 
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
 	if (step_count == 0) return 1; //no step in the buffer
+	float mean = 0;
+	float std = 0;
 	//Evaluate advantages and normalize
 	evaluate_return(buf, step_count, done);
-	evaluate_advantages(buf, step_count);
-	normalize_advantage(buf, step_count);
+	evaluate_mean_std(buf, step_count, &mean, &std);
 
 	//zero grad
 	zero_grad(net); //TODO
 
 	//Re-Forward + PPO
+	Head *sub_net = &net->actor;
+	uint8_t out_dim_actor = sub_net->layers[sub_net->num_layers].out_dim;
+	float output_actor[out_dim_actor];
+	sub_net = &net->critic;
+	uint8_t out_dim_critic = sub_net->layers[sub_net->num_layers].out_dim;
+	float output_critic[out_dim_critic];
+	float log_prob_new = 0.f;
 	for(int epoch =  0; epoch < N_EPOCHS; epoch++){
 		for(int t = 0; t < step_count; t++){
+			float *state = buf->state_buffer[t];
+			forward(net, state, output_actor, output_critic);
 
+			//-----ACTOR LOSS-----
+			//evaluate log_prob_new of the selected action useful for the PPO ratio
+			float action_prob = output_actor[buf->action_buffer[t]];
+			log_prob_new = logf(action_prob + 1e-8f); //Add epsilon 1e-8f to avoid log high values when the argument is near 0
+			//PPO ratio
+			float ratio = expf((log_prob_new - buf->log_prob_old_buffer[t]));
+			float surr1 = ratio * evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std);
+			float surr2 = clip(ratio, 1.0f - 0.2, 1.0f + 0.2);
+			surr2 = surr2 * evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std);
+			float actor_loss_step = (surr1 < surr2) ? surr1 : surr2;
+			actor_loss_step = -actor_loss_step; //minus because we have to maximize it
+
+			//-----CRITIC LOSS-----
+			float critic_loss_step = powf((output_critic[0] - buf->advantage_buffer[t]), 2);
+
+			//TOTAL LOSS
+			//float total_loss = actor_loss_step + (CRIT_LOSS * critic_loss_step) - (ENT_BETA * evaluate_entropy(output_actor, out_dim_actor));
 		}
 	}
 
