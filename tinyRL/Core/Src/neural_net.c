@@ -7,7 +7,7 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int 
 		int *net_topology, int *net_topology_actor, int *net_topology_critic,
 		ActivationType *activations, ActivationType *activations_actor, ActivationType *activations_critic){
 	net->adam_t = 0;
-    net->layers  = malloc(num_layers * sizeof(DenseLayer)); //should be num_layers +1 because we have separate actor critic layers
+    net->layers  = malloc((num_layers + 1) * sizeof(DenseLayer)); //should be num_layers +1 because we have separate actor critic layers
     num_layers--; //there are num_layers-1 set of weight MAYBE I DON'T NEED THIS BECAUSE I WILL HAVE 2 SET OF WEIGHTS AS OUT
     net->num_layers = num_layers;
 
@@ -31,8 +31,11 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int 
     if(!dense_init(&net->layers[num_layers], net_topology[num_layers], net_topology_actor[0], activations[num_layers])) return 0;
     init_layer_params(&net->layers[num_layers]);
     //SHOULD ADD THE CRITIC TOO
+    if(!dense_init(&net->layers[num_layers+1], net_topology[num_layers], net_topology_critic[0], activations[num_layers])) return 0;
+	init_layer_params(&net->layers[num_layers+1]);
 
-    //SHOULD FIX THIS TO PICK THE CORRECT OUTPUT FROM THE SHARED BACKBONE
+
+    //SHOULD FIX THIS TO PICK THE CORRECT OUTPUT FROM THE SHARED BACKBONE fixed??
     for(int i = 0; i < actor->num_layers; i++){
     	if(!dense_init(&actor->layers[i], net_topology_actor[i], net_topology_actor[i+1], activations_actor[i])) return 0;
 		init_layer_params(&actor->layers[i]);
@@ -70,7 +73,7 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
     Head *actor = &net->actor;
     Head *critic = &net->critic;
 
-    for (int l = 0; l < net->num_layers + 1; ++l) { //+1 because we have to manage the last layer that goes into actor/critic
+    for (int l = 0; l < net->num_layers + 1; ++l) { //+1 because we have to manage the last layer NEED TO MODIFY THIS AND MANAGE SEPARATELY THE LAST 2 OUT
         DenseLayer *layer = &net->layers[l];
         curr_out = layer->out; //pointer to layer's output
 
