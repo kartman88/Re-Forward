@@ -9,6 +9,7 @@
 ../Core/Src/reinforce.c:212:7:evaluate_advantages	32	static
 ../Core/Src/reinforce.c:219:6:evaluate_mean_std	48	static
 ../Core/Src/reinforce.c:237:7:evaluate_entropy	32	static
-../Core/Src/reinforce.c:247:10:finish_episode	152	dynamic
-../Core/Src/reinforce.c:361:9:done_check	16	static
-../Core/Src/reinforce.c:370:7:evaluate_reward	16	static
+../Core/Src/reinforce.c:247:6:backward_actor	120	dynamic
+../Core/Src/reinforce.c:295:10:finish_episode	136	dynamic
+../Core/Src/reinforce.c:403:9:done_check	16	static
+../Core/Src/reinforce.c:412:7:evaluate_reward	16	static

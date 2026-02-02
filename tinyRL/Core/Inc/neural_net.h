@@ -16,6 +16,7 @@
 #define EPS_CLIPPING 0.2f
 #define VALUE_W 0.5F
 #define ENTROPY_W 0.01
+#define PPO_EPSILON 0.2
 
 typedef struct{
 	DenseLayer *layers;

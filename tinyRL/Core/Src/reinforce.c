@@ -244,6 +244,54 @@ float evaluate_entropy(float *probs, int n_actions){
 	return entropy;
 }
 
+void backward_actor(SharedBackbone *net, float *input, float *output_new, uint8_t out_dim, uint8_t action_buf, float old_log_prob, float norm_adv){
+	uint8_t is_clipped = 0;
+
+	//-----ACTOR LOSS-----
+	float log_prob_new = 0.f;
+	//evaluate log_prob_new of the selected action useful for the PPO ratio
+	float action_prob = output_new[action_buf];
+	log_prob_new = logf(action_prob + 1e-8f); //Add epsilon 1e-8f to avoid log high values when the argument is near 0
+	//PPO ratio
+	float ratio = expf((log_prob_new - old_log_prob));
+	float surr1 = ratio * norm_adv;
+	float surr2 = clip(ratio, 1.0f - 0.2, 1.0f + 0.2, &is_clipped);
+	surr2 = surr2 * norm_adv;
+	float actor_loss_step = (surr1 < surr2) ? surr1 : surr2;
+	actor_loss_step = -actor_loss_step; //minus because we have to maximize it
+
+	//-----ENTROPY LOSS-----
+	float entropy_loss = ENT_BETA * evaluate_entropy(output_new, out_dim);
+
+	//-----ACTOR GRADIENT-----
+	float d_logits[out_dim];
+	for(int i = 0; i < out_dim; i++){
+		float p = output_new[i];
+		float grad_ppo = 0.0f;
+		float grad_ent = 0.0f;
+
+		if(is_clipped == 0){ //else the gradient is 0 because of the PPO safety clipping
+			if(i == action_buf){
+				//For the choosen action: -(1 - p) * A
+				grad_ppo = -(1.0f - p) * norm_adv;
+			}
+			else{
+				//For other actions: p * A
+				grad_ppo = p * norm_adv;
+			}
+		}
+		//-----ENTROPY GRADIENT-----
+		// Formula: coeff * p * (log(p) + H_total)
+		float log_p = logf(p + 1e-8f);
+		grad_ent = ENT_BETA * p * (log_p + entropy_loss);
+
+		// --- C. Somma Finale ---
+		// Questo è il valore che passerai indietro al layer precedente
+		d_logits[i] = grad_ppo + grad_ent;
+	}
+	backward_core(net, d_logits, input);
+}
+
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
 	if (step_count == 0) return 1; //no step in the buffer
 	float mean = 0;
@@ -262,30 +310,23 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, u
 	sub_net = &net->critic;
 	uint8_t out_dim_critic = sub_net->layers[sub_net->num_layers].out_dim;
 	float output_critic[out_dim_critic];
-	float log_prob_new = 0.f;
+
 	for(int epoch =  0; epoch < N_EPOCHS; epoch++){
 		for(int t = 0; t < step_count; t++){
 			float *state = buf->state_buffer[t];
 			forward(net, state, output_actor, output_critic);
 
-			//-----ACTOR LOSS-----
-			//evaluate log_prob_new of the selected action useful for the PPO ratio
-			float action_prob = output_actor[buf->action_buffer[t]];
-			log_prob_new = logf(action_prob + 1e-8f); //Add epsilon 1e-8f to avoid log high values when the argument is near 0
-			//PPO ratio
-			float ratio = expf((log_prob_new - buf->log_prob_old_buffer[t]));
-			float surr1 = ratio * evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std);
-			float surr2 = clip(ratio, 1.0f - 0.2, 1.0f + 0.2);
-			surr2 = surr2 * evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std);
-			float actor_loss_step = (surr1 < surr2) ? surr1 : surr2;
-			actor_loss_step = -actor_loss_step; //minus because we have to maximize it
+
 
 			//-----CRITIC LOSS-----
 			float critic_loss_step = powf((output_critic[0] - buf->advantage_buffer[t]), 2);
 
 			//TOTAL LOSS
 			//float total_loss = actor_loss_step + (CRIT_LOSS * critic_loss_step) - (ENT_BETA * evaluate_entropy(output_actor, out_dim_actor));
+			backward_actor(net, state, output_actor, out_dim_actor, buf->action_buffer[t], buf->log_prob_old_buffer[t], evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std));
+
 		}
+		//adam_optimizer(net);
 	}
 
 
