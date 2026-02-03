@@ -104,28 +104,28 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   //random seed to generate initial weight
-  srand(HAL_GetTick() ^ 0xA5A5A5A5);
+  srand(HAL_GetTick());
   //-----NETWORK PARAMETERS AND CREATION-----
   int input_size = 4;
   int output_size = 2;
   //create neural network
   SharedBackbone net;
   int num_layers = 2;
-  int num_layers_actor = 3;
-  int num_layers_critic = 3;
+  int num_layers_actor = 2;
+  int num_layers_critic = 2;
   int net_topology[] = {input_size, 64};
-  int net_topology_actor[] = {64, 64, output_size};
-  int net_topology_critic[] = {64, 32, 1};
+  int net_topology_actor[] = {32, output_size};
+  int net_topology_critic[] = {32, 1};
   ActivationType activations[] = {ACT_RELU, ACT_RELU};
-  ActivationType activations_actor[] = {ACT_RELU, ACT_SOFTMAX};
-  ActivationType activations_critic[] = {ACT_RELU, ACT_NONE};
+  ActivationType activations_actor[] = {ACT_SOFTMAX};
+  ActivationType activations_critic[] = {ACT_NONE};
   int is_ok = init_network(&net, num_layers, num_layers_actor, num_layers_critic,
 		  	  net_topology, net_topology_actor, net_topology_critic,
 			  activations, activations_actor, activations_critic);
 
   //-----BUFFER PARAMETER AND CREATION-----
   Buffer buffer;
-  int buffer_size = 1000;
+  int buffer_size = MAX_STEPS;
   buffer_init(&buffer, buffer_size, input_size);
   uint32_t step_count = 0;
   uint32_t num_episode = 0;
@@ -139,23 +139,24 @@ int main(void)
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
   if(is_ok) HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
   else HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
+  uint8_t success_count = 0;
 
   while (1){
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
 	  if(uart_recv_floats(&huart3, obs, net_topology[0], 50)){
 		  if(step(&net, obs, &action, &reward, &done, &step_count, &buffer)){
 			  uart_send_action(&huart3, action, done, 50);
+			  if(reward >= 450) success_count++;
 		  }
 		  if(done == 1 || done == 2){
-			  if(train == 1) finish_episode(&buffer, &net, step_count, done); //TODO
+			  if(train == 1) finish_episode(&buffer, &net, step_count, done);
+			  if(success_count > 3) train = 0;
 			  step_count = 0;
 			  num_episode++;
 		  }
 	  }
 	  if(num_episode > MAX_EPISODE){
 		  train = 0;
-		  break;
+		  //break;
 	  }
     /* USER CODE END WHILE */
 

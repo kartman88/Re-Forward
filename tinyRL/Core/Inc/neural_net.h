@@ -2,20 +2,20 @@
 #define NEURAL_NET_H
 #include "dense_layer.h"
 
-#define LR 0.02f //0.01 and 0.02 good for CartPole
+#define LR 0.003f //0.003 good for CartPole
 #define BETA1 0.9f
 #define BETA2 0.999f
 #define EPS_ADAM 1e-8f
 #define GAMMA 0.99f
-#define ENT_BETA 0.01f //0.001 good for cartpole
+#define ENT_BETA 0.001f //0.001 good for CartPole
 #define CRIT_LOSS 0.5
 #define MAX_EPISODE 100
 #define MAX_STEPS 500
 
-#define N_EPOCHS 3
+#define N_EPOCHS 10
 #define EPS_CLIPPING 0.2f
-#define VALUE_W 0.5F
-#define ENTROPY_W 0.01
+#define CRITIC_COEFF 0.5F
+#define ENTROPY_W 0.001 //0.001 good for CartPole
 #define PPO_EPSILON 0.2
 
 typedef struct{

@@ -36,7 +36,7 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor, int 
 	init_layer_params(&net->layers[num_layers+1]);
 
 
-    //SHOULD FIX THIS TO PICK THE CORRECT OUTPUT FROM THE SHARED BACKBONE fixed??
+    //ACTOR/CRITIC INIT
     for(int i = 0; i < actor->num_layers; i++){
     	if(!dense_init(&actor->layers[i], net_topology_actor[i], net_topology_actor[i+1], activations_actor[i])) return 0;
 		init_layer_params(&actor->layers[i]);
@@ -318,29 +318,75 @@ void backward_pg(SharedBackbone *net, float *input, uint8_t action, float advant
 	//free(dlogit);
 }
 
-void adam_optimizer(SharedBackbone *net){
-	//Adam update (ascent)
-	net->adam_t++;
-	const float b1t = 1.f - powf(BETA1, (float)net->adam_t);
-	const float b2t = 1.f - powf(BETA2, (float)net->adam_t);
+// Funzione helper che aggiorna un singolo layer (usabile per Shared, Actor e Critic)
+void adam_update_single_layer(DenseLayer *ly, float b1t, float b2t) {
+    // Bias
+    for (int i = 0; i < ly->out_dim; ++i) {
+        // Calcolo momenti
+        ly->mb[i] = BETA1 * ly->mb[i] + (1.f - BETA1) * ly->db[i];
+        ly->vb[i] = BETA2 * ly->vb[i] + (1.f - BETA2) * ly->db[i] * ly->db[i];
 
-	for (int l = 0; l < net->num_layers; ++l) {
-		DenseLayer *ly = &net->layers[l];
+        // Correzione Bias (Hat)
+        float m_hat = ly->mb[i] / b1t;
+        float v_hat = ly->vb[i] / b2t;
 
-		//bias
-		for (int i = 0; i < ly->out_dim; ++i) {
-			ly->mb[i] = BETA1*ly->mb[i] + (1.f-BETA1)*ly->db[i];
-			ly->vb[i] = BETA2*ly->vb[i] + (1.f-BETA2)*ly->db[i]*ly->db[i];
-			ly->b [i]+= LR * (ly->mb[i]/b1t) / (sqrtf(ly->vb[i]/b2t) + EPS_ADAM);
-		}
-		//weight
-		for (int i = 0; i < ly->out_dim; ++i)
-			for (int j = 0; j < ly->in_dim; ++j) {
-				ly->mW[i][j] = BETA1*ly->mW[i][j] + (1.f-BETA1)*ly->dW[i][j];
-				ly->vW[i][j] = BETA2*ly->vW[i][j] + (1.f-BETA2)*ly->dW[i][j]*ly->dW[i][j];
-				ly->W[i][j]+= LR * (ly->mW[i][j]/b1t) / (sqrtf(ly->vW[i][j]/b2t) + EPS_ADAM);
-			}
-	}
+        // Aggiornamento Pesi (GRADIENT DESCENT -> USA -=)
+        ly->b[i] -= LR * m_hat / (sqrtf(v_hat) + EPS_ADAM);
+
+        // RESET DEL GRADIENTE PER IL PROSSIMO STEP
+        ly->db[i] = 0.0f;
+    }
+
+    // Weights
+    for (int i = 0; i < ly->out_dim; ++i) {
+        for (int j = 0; j < ly->in_dim; ++j) {
+            // Calcolo momenti
+            ly->mW[i][j] = BETA1 * ly->mW[i][j] + (1.f - BETA1) * ly->dW[i][j];
+            ly->vW[i][j] = BETA2 * ly->vW[i][j] + (1.f - BETA2) * ly->dW[i][j] * ly->dW[i][j];
+
+            // Correzione Bias (Hat)
+            float m_hat = ly->mW[i][j] / b1t;
+            float v_hat = ly->vW[i][j] / b2t;
+
+            // Aggiornamento Pesi (GRADIENT DESCENT -> USA -=)
+            ly->W[i][j] -= LR * m_hat / (sqrtf(v_hat) + EPS_ADAM);
+
+            // RESET DEL GRADIENTE
+            ly->dW[i][j] = 0.0f;
+        }
+    }
+}
+
+void adam_optimizer(SharedBackbone *net) {
+    // 1. Aggiornamento Time Step Globale
+    net->adam_t++;
+
+    // Calcolo coefficienti validi per tutti i layer di questa epoch
+    const float b1t = 1.f - powf(BETA1, (float)net->adam_t);
+    const float b2t = 1.f - powf(BETA2, (float)net->adam_t);
+
+    // ----------------------------------------------------
+    // A. Aggiornamento Shared Backbone + Link Layers
+    // ----------------------------------------------------
+    // Il loop va da 0 a num_layers + 2 (Trunk + LinkActor + LinkCritic)
+    // Assicurati che l'allocazione di net->layers sia di dimensione 3!
+    for (int l = 0; l < net->num_layers + 2; ++l) {
+        adam_update_single_layer(&net->layers[l], b1t, b2t);
+    }
+
+    // ----------------------------------------------------
+    // B. Aggiornamento Actor Head
+    // ----------------------------------------------------
+    for (int l = 0; l < net->actor.num_layers; ++l) {
+        adam_update_single_layer(&net->actor.layers[l], b1t, b2t);
+    }
+
+    // ----------------------------------------------------
+    // C. Aggiornamento Critic Head
+    // ----------------------------------------------------
+    for (int l = 0; l < net->critic.num_layers; ++l) {
+        adam_update_single_layer(&net->critic.layers[l], b1t, b2t);
+    }
 }
 
 void gradient_norm_l2(SharedBackbone *net){

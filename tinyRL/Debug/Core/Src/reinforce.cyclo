@@ -1,0 +1,17 @@
+../Core/Src/reinforce.c:17:5:buffer_init	10
+../Core/Src/reinforce.c:57:5:uart_recv_floats	7
+../Core/Src/reinforce.c:84:5:uart_send_action	1
+../Core/Src/reinforce.c:89:5:uart_send_log	1
+../Core/Src/reinforce.c:109:10:sample_action	4
+../Core/Src/reinforce.c:128:6:store_step	3
+../Core/Src/reinforce.c:144:5:step	6
+../Core/Src/reinforce.c:189:6:evaluate_return	7
+../Core/Src/reinforce.c:212:7:evaluate_advantages	1
+../Core/Src/reinforce.c:219:6:evaluate_mean_std	4
+../Core/Src/reinforce.c:237:7:evaluate_entropy	3
+../Core/Src/reinforce.c:247:6:backward_core_head	14
+../Core/Src/reinforce.c:328:6:backward_shared_backbone	20
+../Core/Src/reinforce.c:480:6:backward_actor_critic	5
+../Core/Src/reinforce.c:542:10:finish_episode	6
+../Core/Src/reinforce.c:690:9:done_check	4
+../Core/Src/reinforce.c:699:7:evaluate_reward	1

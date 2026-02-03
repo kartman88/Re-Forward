@@ -1,14 +1,11 @@
 #include "utils.h"
 
-float clip(float value, float range_min, float range_max, uint8_t *is_clipped){
-	*is_clipped = 0;
+float clip(float value, float range_min, float range_max){
 	if(value > range_max){
 		value = range_max;
-		*is_clipped = 1;
 	}
 	if(value < range_min){
 		value = range_min;
-		*is_clipped = 1;
 	}
 	return value;
 }

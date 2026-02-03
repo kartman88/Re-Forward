@@ -49,13 +49,27 @@ int alloc_2d(float ***matrix, int rows, int cols){
 }
 
 void init_layer_params(DenseLayer *layer){
+    // CALCOLO DEL LIMITE DI XAVIER (GLOROT)
+    // Formula: sqrt(6 / (in_dim + out_dim))
+    // Questo mantiene la varianza del segnale stabile attraverso i layer
+    float limit = sqrtf(6.0f / (float)(layer->in_dim + layer->out_dim));
+
     for (int i = 0; i < layer->out_dim; ++i) {
         for (int j = 0; j < layer->in_dim; ++j){
-            layer->W[i][j] = 0.05f * (frand() - 0.5f);
-        	layer->dW[i][j] = 0.0f;
+            // Generiamo un numero tra -limit e +limit
+            // frand() -> [0, 1]
+            // frand() - 0.5 -> [-0.5, 0.5]
+            // * 2.0 -> [-1.0, 1.0]
+            // * limit -> [-limit, limit]
+            layer->W[i][j] = (frand() - 0.5f) * 2.0f * limit;
+
+            // Azzera gradienti e momenti
+            layer->dW[i][j] = 0.0f;
             layer->mW[i][j] = 0.0f;
             layer->vW[i][j] = 0.0f;
         }
+
+        // Bias inizializzati a 0
         layer->b[i] = 0.0f;
         layer->db[i] = 0.0f;
         layer->mb[i] = 0.0f;
@@ -82,6 +96,6 @@ int dense_init(DenseLayer *layer, int in_dim, int out_dim, ActivationType activa
     layer->vb = malloc(out_dim * sizeof(float));
     if (!layer->b || !layer->db || !layer->mb || !layer->vb || !layer->out) return 0;
 
-    init_layer_params(layer);
+    //init_layer_params(layer);
     return 1;
 }

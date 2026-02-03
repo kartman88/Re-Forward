@@ -244,81 +244,266 @@ float evaluate_entropy(float *probs, int n_actions){
 	return entropy;
 }
 
-void backward_core_head(Head *net, float *dout_last, float *input){
-	//backprop of the gradient
-	float *delta = dout_last;
-	float *prev = NULL;
-	static float *delta_buf = NULL;
-	static uint32_t delta_cap = 0;
+void backward_core_head(Head *net, float *dout_last, float *input, float *accumulate_out){
+    // backprop of the gradient
+    float *delta = dout_last;
 
-	for(int l = net->num_layers - 1; l >= 0; --l){
-		DenseLayer *ly = &net->layers[l];
+    // Buffer dinamico per i calcoli INTERNI (tra i layer della head)
+    static float *delta_buf = NULL;
+    static uint32_t delta_cap = 0;
 
-		float *inp = (l == 0) ? input : net->layers[l-1].out; //BUCO ADT IMPLEMENTARE UNA GET
+    float *prev = NULL;
 
-		//accumulate grad
-		for (int i = 0; i < ly->out_dim; ++i) {
-		    ly->db[i] += delta[i];
-		    for (int j = 0; j < ly->in_dim; ++j)
-		        ly->dW[i][j] += delta[i] * inp[j];
-		}
+    for(int l = net->num_layers - 1; l >= 0; --l){
+    	DenseLayer *ly = &net->layers[l];
 
-		//prepare next delta if not the last layer
-		if(l > 0){
-			//memory optimization, allocate only if first time or dim is different
-			if (ly->in_dim > delta_cap){
-				free(delta_buf);
-				delta_buf  = malloc(ly->in_dim * sizeof(float));
-				delta_cap  = ly->in_dim;
-				if (!delta_buf) return;
-			}
-			prev = delta_buf;
+        // Se l=0 l'input è quello passato alla funzione, altrimenti è l'out del layer precedente
+    	float *inp = (l == 0) ? input : net->layers[l-1].out; // BUCO ADT: ok logica puntatori
 
-			//accumulate grad
-			for(int j = 0; j < ly->in_dim; ++j){
-				float acc = 0.0f;
-				for(int i = 0; i< ly->out_dim; ++i){
-					acc += delta[i] * ly->W[i][j];
-				}
-				float h_prev = net->layers[l-1].out[j]; //BUCO ADT CREARE UNA GET
-				switch(net->layers[l-1].activation){ //BUCO ADT CREARE UNA GET
-					case ACT_RELU: acc = (h_prev > 0.f) ? acc : 0.f; break;
-					default: break; //TODO ACT_NONE etc...
-				}
-				prev[j] = acc;
-			}
-			delta = prev;
-		}
-	}
+        // 1. Accumulate grad (Aggiornamento Pesi e Bias del layer corrente)
+        // Questo passaggio è identico per tutti i layer
+        for (int i = 0; i < ly->out_dim; ++i) {
+            ly->db[i] += delta[i];
+            for (int j = 0; j < ly->in_dim; ++j)
+                ly->dW[i][j] += delta[i] * inp[j];
+        }
+
+        // 2. Prepare next delta (Propagazione all'indietro)
+        // Dobbiamo decidere DOVE scrivere il risultato e SE applicare la derivata dell'attivazione
+
+        float *target_buf = NULL;
+
+        if (l == 0) {
+            // SIAMO ALL'USCITA: Scriviamo nel buffer di output per i linked layers
+            target_buf = accumulate_out;
+        } else {
+            // SIAMO DENTRO LA HEAD: Usiamo il buffer temporaneo
+            // memory optimization (tua logica originale)
+            if (ly->in_dim > delta_cap){
+                free(delta_buf);
+                delta_buf  = malloc(ly->in_dim * sizeof(float));
+                delta_cap  = ly->in_dim;
+                if (!delta_buf) return; // Gestione errore
+            }
+            target_buf = delta_buf;
+        }
+
+        // Se abbiamo un buffer valido dove scrivere (accumulate_out non deve essere NULL)
+        if (target_buf != NULL) {
+            prev = target_buf;
+
+            for(int j = 0; j < ly->in_dim; ++j){
+                float acc = 0.0f;
+
+                // A. Calcolo parte lineare (Moltiplicazione matriciale Delta * W trasposta)
+                for(int i = 0; i < ly->out_dim; ++i){
+                    acc += delta[i] * ly->W[i][j];
+                }
+
+                // B. Gestione Derivata Attivazione
+                if (l > 0) {
+                    // Caso INTERNO: Dobbiamo derivare l'attivazione del layer precedente (l-1)
+                    // che appartiene ancora a questa Head.
+                    float h_prev = net->layers[l-1].out[j];
+                    switch(net->layers[l-1].activation){
+                        case ACT_RELU: acc = (h_prev > 0.f) ? acc : 0.f; break;
+                        default: break; // TODO ACT_NONE etc...
+                    }
+                }
+                else {
+                    // Caso USCITA (l == 0): Stiamo uscendo verso lo Shared/Linked.
+                    // NON applichiamo la derivata dell'attivazione qui.
+                    // Passiamo il gradiente "lineare" puro. La derivata dell'attivazione
+                    // che ha generato 'input' verrà fatta nella funzione dello shared.
+                }
+
+                prev[j] = acc;
+            }
+            // Aggiorniamo delta per il prossimo giro (solo se non siamo alla fine)
+            delta = prev;
+        }
+    }
 }
 
-void backward_actor_critic(SharedBackbone *net, float *input, float *output_new, uint8_t out_dim, uint8_t action_buf, float old_log_prob, float norm_adv){
-	uint8_t is_clipped = 0;
+void backward_shared_backbone(SharedBackbone *net, float *grad_from_actor, float *grad_from_critic, float *sensor_input) {
+
+    // --- MAPPING DEI LAYER ---
+    // Assumiamo la struttura che abbiamo concordato:
+    // layers[0]: Shared Trunk (Output usato da Link Actor e Link Critic)
+    // layers[1]: Link Actor (Input: Trunk Out -> Output: Actor Head In)
+    // layers[2]: Link Critic (Input: Trunk Out -> Output: Critic Head In)
+
+    // Attenzione: verifica che net->num_layers sia gestito coerentemente.
+    // Qui uso indici fissi per chiarezza, ma potresti volerlo parametrizzare.
+    DenseLayer *trunk       = &net->layers[0];
+    DenseLayer *link_actor  = &net->layers[1];
+    DenseLayer *link_critic = &net->layers[2];
+
+    // Buffer per l'accumulo che scende verso il tronco (dL/da del tronco)
+    // Lo inizializziamo a 0 perché ci sommeremo dentro due contributi.
+    // WARNING: Verifica che lo stack supporti questa dimensione (VLA)
+    float trunk_grad_accum[trunk->out_dim];
+    memset(trunk_grad_accum, 0, trunk->out_dim * sizeof(float));
+
+    // ============================================================
+    // FASE 1: BACKPROP SU LINK ACTOR (Layer 1)
+    // ============================================================
+    {
+        float *delta = grad_from_actor; // Questo è dL/da (gradiente rispetto all'output)
+        float *input = trunk->out;      // Input ricevuto nella forward pass
+
+        for (int i = 0; i < link_actor->out_dim; i++) {
+            // A. Derivata dell'attivazione (dL/da -> dL/dz)
+            // Trasformiamo il gradiente "grezzo" in "delta" locale
+            float out_val = link_actor->out[i]; // TODO: Verificare se l'attivazione serve pre o post
+
+            switch (link_actor->activation) {
+                case ACT_RELU:
+                    delta[i] = (out_val > 0.0f) ? delta[i] : 0.0f;
+                    break;
+                /*case ACT_TANH: // Esempio
+                    delta[i] = delta[i] * (1.0f - out_val * out_val);
+                    break;*/
+                case ACT_NONE:
+                default:
+                    // delta rimane invariato
+                    break;
+            }
+
+            // B. Aggiornamento Pesi (dW) e Bias (db)
+            link_actor->db[i] += delta[i];
+            for (int j = 0; j < link_actor->in_dim; j++) {
+                link_actor->dW[i][j] += delta[i] * input[j];
+            }
+        }
+
+        // C. Calcolo Accumulo verso il Tronco (W^T * delta)
+        for (int j = 0; j < link_actor->in_dim; j++) {
+            float acc = 0.0f;
+            for (int i = 0; i < link_actor->out_dim; i++) {
+                acc += delta[i] * link_actor->W[i][j];
+            }
+            // Scriviamo nel buffer comune (PRIMA SCRITTURA o +=, qui è 0 all'inizio quindi += va bene)
+            trunk_grad_accum[j] += acc;
+        }
+    }
+
+    // ============================================================
+    // FASE 2: BACKPROP SU LINK CRITIC (Layer 2)
+    // ============================================================
+    {
+        float *delta = grad_from_critic;
+        float *input = trunk->out;
+
+        for (int i = 0; i < link_critic->out_dim; i++) {
+            // A. Derivata Attivazione
+            float out_val = link_critic->out[i];
+
+            switch (link_critic->activation) {
+                case ACT_RELU:
+                    delta[i] = (out_val > 0.0f) ? delta[i] : 0.0f;
+                    break;
+                // ... altri casi ...
+                default: break;
+            }
+
+            // B. Aggiornamento Pesi
+            link_critic->db[i] += delta[i];
+            for (int j = 0; j < link_critic->in_dim; j++) {
+                link_critic->dW[i][j] += delta[i] * input[j];
+            }
+        }
+
+        // C. Calcolo Accumulo verso il Tronco (SOMMA)
+        for (int j = 0; j < link_critic->in_dim; j++) {
+            float acc = 0.0f;
+            for (int i = 0; i < link_critic->out_dim; i++) {
+                acc += delta[i] * link_critic->W[i][j];
+            }
+            // SOMMA CRUCIALE: Aggiungiamo il contributo del Critic a quello dell'Actor
+            trunk_grad_accum[j] += acc;
+        }
+    }
+
+    // ============================================================
+    // FASE 3: BACKPROP SUL TRONCO CONDIVISO (Loop all'indietro)
+    // ============================================================
+
+    // Inizia la discesa dal layer 0 verso l'input dei sensori.
+    // Attualmente hai solo il layer 0, ma il ciclo lo rende robusto se ne aggiungi altri.
+    // Usiamo 'num_layers' inteso come layer del tronco (nel tuo caso, immagino sia 1).
+    // SE invece net->num_layers include anche i link (quindi è 3), il loop deve partire da 0.
+    // Assumo qui che tu voglia iterare solo sul tronco (indice 0).
+
+    float *next_layer_delta = trunk_grad_accum; // Questo è il delta che arriva dall'alto
+
+    // NOTA: Se hai più layer nel tronco, gestisci malloc/free per buffer intermedi come fatto in core_head
+    // Per ora assumiamo 1 solo layer (l=0), quindi niente buffer dinamici complessi.
+
+    for (int l = 0; l >= 0; l--) { // Loop fatto per 1 solo layer (0)
+        DenseLayer *ly = &net->layers[l];
+
+        // Input: Se l=0 è il sensore, altrimenti output layer precedente (l-1)
+        float *inp = (l == 0) ? sensor_input : net->layers[l-1].out;
+
+        // 1. Derivata Attivazione Layer Corrente (Trunk)
+        // Trasformiamo next_layer_delta (dL/da) in delta (dL/dz)
+        for (int i = 0; i < ly->out_dim; i++) {
+            float out_val = ly->out[i];
+            switch (ly->activation) {
+                case ACT_RELU:
+                    next_layer_delta[i] = (out_val > 0.0f) ? next_layer_delta[i] : 0.0f;
+                    break;
+                // ...
+                default: break;
+            }
+        }
+
+        // 2. Aggiornamento Pesi
+        for (int i = 0; i < ly->out_dim; i++) {
+            ly->db[i] += next_layer_delta[i];
+            for (int j = 0; j < ly->in_dim; j++) {
+                ly->dW[i][j] += next_layer_delta[i] * inp[j];
+            }
+        }
+
+        // 3. Accumulo per layer precedenti (SOLO SE l > 0)
+        if (l > 0) {
+            // Qui dovresti calcolare il gradiente per il layer l-1 e metterlo in un buffer
+            // per il prossimo giro del loop.
+            // Dato che per ora hai solo l=0, questa parte non viene eseguita e risparmiamo calcoli.
+            // Se espandi il tronco, copia la logica di backward_core_head qui.
+        }
+    }
+}
+
+void backward_actor_critic(SharedBackbone *net, float *sensor_input, float *output_actor_new, uint8_t out_dim, float *output_critic_new, float ret_norm,
+		uint8_t action_buf, float old_log_prob, float norm_adv){
 
 	//-----ACTOR LOSS-----
 	float log_prob_new = 0.f;
 	//evaluate log_prob_new of the selected action useful for the PPO ratio
-	float action_prob = output_new[action_buf];
+	float action_prob = output_actor_new[action_buf];
 	log_prob_new = logf(action_prob + 1e-8f); //Add epsilon 1e-8f to avoid log high values when the argument is near 0
 	//PPO ratio
 	float ratio = expf((log_prob_new - old_log_prob));
 	float surr1 = ratio * norm_adv;
-	float surr2 = clip(ratio, 1.0f - 0.2, 1.0f + 0.2, &is_clipped);
+	float surr2 = clip(ratio, 1.0f - 0.2, 1.0f + 0.2);
 	surr2 = surr2 * norm_adv;
 	//float actor_loss_step = (surr1 < surr2) ? surr1 : surr2;
 	//actor_loss_step = -actor_loss_step; //minus because we have to maximize it
 
 	//-----ENTROPY LOSS-----
-	float entropy_val = evaluate_entropy(output_new, out_dim);
+	float entropy_val = evaluate_entropy(output_actor_new, out_dim);
 
 	//-----ACTOR GRADIENT-----
 	float d_logits_actor[out_dim];
 	for(int i = 0; i < out_dim; i++){
-		float p = output_new[i];
+		float p = output_actor_new[i];
 		float grad_ppo = 0.0f;
 		float grad_ent = 0.0f;
 
-		if(is_clipped == 0){ //else the gradient is 0 because of the PPO safety clipping
+		if(surr1 <= surr2){ //else the gradient is 0 because of the PPO safety clipping
 			if(i == action_buf){
 				//For the choosen action: -(1 - p) * A
 				grad_ppo = -(1.0f - p) * norm_adv;
@@ -340,54 +525,100 @@ void backward_actor_critic(SharedBackbone *net, float *input, float *output_new,
 
 	//-----CRITIC LOSS-----
 	//float critic_loss_step = powf((output_critic[0] - buf->advantage_buffer[t]), 2);
-	float d_logits_critic[];
-	//for(int i = 0; i < out_dim_critic; i++) d_logits_critic[i] = CRITIC_COEFF * 2.0f * (V_pred - R_norm);//TODO
+	float d_logits_critic[1];
+	for(int i = 0; i < 1; i++) d_logits_critic[i] = CRITIC_COEFF * 2.0f * (output_critic_new[0] - ret_norm);
 
 	//POSSO CHIAMARE UN'UNICA FUNZIONE PER ENTRAMBE DOVE DENTRO IN MODO SEPARATO CALCOLO LE DERIVATE E L'ACCUMULO
 	//POI SOMMO GLI ACCUMULI FINALI (ACTOR E CRITIC CON SHARED DEVONO AVERE STESSO LAYER INIZIALE) E LI PASSO ALLO SHARED PER LA PARTE FINALE
-	backward_core_head(&net->actor, d_logits_actor, input);
+	float grad_from_actor[net->actor.layers[0].in_dim];
+	float grad_from_critic[net->critic.layers[0].in_dim];
+	backward_core_head(&net->actor, d_logits_actor, net->layers[net->num_layers].out, grad_from_actor);
+	backward_core_head(&net->critic, d_logits_critic, net->layers[net->num_layers+1].out, grad_from_critic);
+	backward_shared_backbone(net, grad_from_actor, grad_from_critic, sensor_input);
 }
 
+
+
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
-	if (step_count == 0) return 1; //no step in the buffer
-	float mean = 0;
-	float std = 0;
-	//Evaluate advantages and normalize
-	evaluate_return(buf, step_count, done);
-	evaluate_mean_std(buf, step_count, &mean, &std);
+    if (step_count == 0) return 1;
 
-	//zero grad
-	zero_grad(net); //TODO
+    // --- FASE 1: PRE-CALCOLO (Una volta sola per episodio) ---
 
-	//Re-Forward + PPO
-	Head *sub_net = &net->actor;
-	uint8_t out_dim_actor = sub_net->layers[sub_net->num_layers].out_dim;
-	float output_actor[out_dim_actor];
-	sub_net = &net->critic;
-	uint8_t out_dim_critic = sub_net->layers[sub_net->num_layers].out_dim;
-	float output_critic[out_dim_critic];
+    // 1. Calcola i Returns (R) e li mette in advantage_buffer
+    evaluate_return(buf, step_count, done);
 
-	for(int epoch =  0; epoch < N_EPOCHS; epoch++){
-		for(int t = 0; t < step_count; t++){
-			float *state = buf->state_buffer[t];
-			forward(net, state, output_actor, output_critic);
+    // 2. Calcola Mean e Std dell'Advantage (A = R - V_old)
+    float sum_adv = 0;
+    float sum_adv_sq = 0;
 
+    for(int t = 0; t < step_count; t++){
+        float ret = buf->advantage_buffer[t]; // Contiene Return (R)
+        float v_old = buf->critic_buffer[t];  // Contiene Valore Vecchio (V_old)
+        float adv = ret - v_old;
 
+        sum_adv += adv;
+        sum_adv_sq += adv * adv;
+    }
 
-			//-----CRITIC LOSS-----
-			float critic_loss_step = powf((output_critic[0] - buf->advantage_buffer[t]), 2);
+    float mean = sum_adv / step_count;
+    float std = sqrtf((sum_adv_sq / step_count) - (mean * mean) + 1e-9f);
 
-			//TOTAL LOSS
-			//float total_loss = actor_loss_step + (CRIT_LOSS * critic_loss_step) - (ENT_BETA * evaluate_entropy(output_actor, out_dim_actor));
-			backward_actor_critic(net, net->layers[out_dim_actor].out, output_actor, out_dim_actor,
-					buf->action_buffer[t], buf->log_prob_old_buffer[t], evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std));
+    // 3. Normalizza e Salva (Riutilizzo RAM)
+    // Usiamo critic_buffer per salvare l'Advantage Normalizzato pronto all'uso
+    for(int t = 0; t < step_count; t++){
+        float ret = buf->advantage_buffer[t];
+        float v_old = buf->critic_buffer[t];
+        float adv_raw = ret - v_old;
 
-		}
-		//adam_optimizer(net);
-	}
+        buf->critic_buffer[t] = (adv_raw - mean) / std;
+    }
 
+    // --- FASE 2: TRAINING LOOP (PPO) ---
 
-	return 1;
+    // Buffer temporanei per le uscite (allocati nello stack)
+    uint8_t out_dim_actor = net->actor.layers[net->actor.num_layers-1].out_dim;
+    float output_actor[out_dim_actor];
+
+    uint8_t out_dim_critic = net->critic.layers[net->critic.num_layers-1].out_dim;
+    float output_critic[out_dim_critic];
+
+    for(int epoch = 0; epoch < N_EPOCHS; epoch++){
+
+        // Reset dei gradienti all'inizio di ogni epoca
+        zero_grad(net);
+
+        for(int t = 0; t < step_count; t++){
+            // Recupera lo stato grezzo dal buffer
+            float *state = buf->state_buffer[t];
+
+            // Forward Pass: Calcola probabilità e valori correnti
+            forward(net, state, output_actor, output_critic);
+
+            // Recupera i dati pre-calcolati
+            float normalized_advantage = buf->critic_buffer[t];     // A_norm (per Actor)
+            float return_target = buf->advantage_buffer[t];         // R (per Critic)
+            float old_log_prob = buf->log_prob_old_buffer[t];
+            uint8_t action = (uint8_t)buf->action_buffer[t];
+
+            // Backward Pass
+            backward_actor_critic(
+                net,
+                state,              // <--- CORRETTO: Passiamo lo stato originale (Input Sensori)
+                output_actor,       // output_actor_new
+                out_dim_actor,      // out_dim
+                output_critic,      // output_critic_new
+                return_target,      // ret_norm (Target del Critic)
+                action,             // action_buf
+                old_log_prob,       // old_log_prob
+                normalized_advantage // norm_adv (Advantage per Actor)
+            );
+        }
+
+        // Applica le modifiche ai pesi (Adam)
+        adam_optimizer(net);
+    }
+
+    return 1;
 }
 
 /*uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count){
