@@ -244,7 +244,55 @@ float evaluate_entropy(float *probs, int n_actions){
 	return entropy;
 }
 
-void backward_actor(SharedBackbone *net, float *input, float *output_new, uint8_t out_dim, uint8_t action_buf, float old_log_prob, float norm_adv){
+void backward_core_head(Head *net, float *dout_last, float *input){
+	//backprop of the gradient
+	float *delta = dout_last;
+	float *prev = NULL;
+	static float *delta_buf = NULL;
+	static uint32_t delta_cap = 0;
+
+	for(int l = net->num_layers - 1; l >= 0; --l){
+		DenseLayer *ly = &net->layers[l];
+
+		float *inp = (l == 0) ? input : net->layers[l-1].out; //BUCO ADT IMPLEMENTARE UNA GET
+
+		//accumulate grad
+		for (int i = 0; i < ly->out_dim; ++i) {
+		    ly->db[i] += delta[i];
+		    for (int j = 0; j < ly->in_dim; ++j)
+		        ly->dW[i][j] += delta[i] * inp[j];
+		}
+
+		//prepare next delta if not the last layer
+		if(l > 0){
+			//memory optimization, allocate only if first time or dim is different
+			if (ly->in_dim > delta_cap){
+				free(delta_buf);
+				delta_buf  = malloc(ly->in_dim * sizeof(float));
+				delta_cap  = ly->in_dim;
+				if (!delta_buf) return;
+			}
+			prev = delta_buf;
+
+			//accumulate grad
+			for(int j = 0; j < ly->in_dim; ++j){
+				float acc = 0.0f;
+				for(int i = 0; i< ly->out_dim; ++i){
+					acc += delta[i] * ly->W[i][j];
+				}
+				float h_prev = net->layers[l-1].out[j]; //BUCO ADT CREARE UNA GET
+				switch(net->layers[l-1].activation){ //BUCO ADT CREARE UNA GET
+					case ACT_RELU: acc = (h_prev > 0.f) ? acc : 0.f; break;
+					default: break; //TODO ACT_NONE etc...
+				}
+				prev[j] = acc;
+			}
+			delta = prev;
+		}
+	}
+}
+
+void backward_actor_critic(SharedBackbone *net, float *input, float *output_new, uint8_t out_dim, uint8_t action_buf, float old_log_prob, float norm_adv){
 	uint8_t is_clipped = 0;
 
 	//-----ACTOR LOSS-----
@@ -257,14 +305,14 @@ void backward_actor(SharedBackbone *net, float *input, float *output_new, uint8_
 	float surr1 = ratio * norm_adv;
 	float surr2 = clip(ratio, 1.0f - 0.2, 1.0f + 0.2, &is_clipped);
 	surr2 = surr2 * norm_adv;
-	float actor_loss_step = (surr1 < surr2) ? surr1 : surr2;
-	actor_loss_step = -actor_loss_step; //minus because we have to maximize it
+	//float actor_loss_step = (surr1 < surr2) ? surr1 : surr2;
+	//actor_loss_step = -actor_loss_step; //minus because we have to maximize it
 
 	//-----ENTROPY LOSS-----
-	float entropy_loss = ENT_BETA * evaluate_entropy(output_new, out_dim);
+	float entropy_val = evaluate_entropy(output_new, out_dim);
 
 	//-----ACTOR GRADIENT-----
-	float d_logits[out_dim];
+	float d_logits_actor[out_dim];
 	for(int i = 0; i < out_dim; i++){
 		float p = output_new[i];
 		float grad_ppo = 0.0f;
@@ -283,13 +331,21 @@ void backward_actor(SharedBackbone *net, float *input, float *output_new, uint8_
 		//-----ENTROPY GRADIENT-----
 		// Formula: coeff * p * (log(p) + H_total)
 		float log_p = logf(p + 1e-8f);
-		grad_ent = ENT_BETA * p * (log_p + entropy_loss);
+		grad_ent = ENT_BETA * p * (log_p + entropy_val);
 
 		// --- C. Somma Finale ---
 		// Questo è il valore che passerai indietro al layer precedente
-		d_logits[i] = grad_ppo + grad_ent;
+		d_logits_actor[i] = grad_ppo + grad_ent;
 	}
-	backward_core(net, d_logits, input);
+
+	//-----CRITIC LOSS-----
+	//float critic_loss_step = powf((output_critic[0] - buf->advantage_buffer[t]), 2);
+	float d_logits_critic[];
+	//for(int i = 0; i < out_dim_critic; i++) d_logits_critic[i] = CRITIC_COEFF * 2.0f * (V_pred - R_norm);//TODO
+
+	//POSSO CHIAMARE UN'UNICA FUNZIONE PER ENTRAMBE DOVE DENTRO IN MODO SEPARATO CALCOLO LE DERIVATE E L'ACCUMULO
+	//POI SOMMO GLI ACCUMULI FINALI (ACTOR E CRITIC CON SHARED DEVONO AVERE STESSO LAYER INIZIALE) E LI PASSO ALLO SHARED PER LA PARTE FINALE
+	backward_core_head(&net->actor, d_logits_actor, input);
 }
 
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
@@ -323,7 +379,8 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, u
 
 			//TOTAL LOSS
 			//float total_loss = actor_loss_step + (CRIT_LOSS * critic_loss_step) - (ENT_BETA * evaluate_entropy(output_actor, out_dim_actor));
-			backward_actor(net, state, output_actor, out_dim_actor, buf->action_buffer[t], buf->log_prob_old_buffer[t], evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std));
+			backward_actor_critic(net, net->layers[out_dim_actor].out, output_actor, out_dim_actor,
+					buf->action_buffer[t], buf->log_prob_old_buffer[t], evaluate_advantages(buf->advantage_buffer[t], buf->critic_buffer[t], mean, std));
 
 		}
 		//adam_optimizer(net);
