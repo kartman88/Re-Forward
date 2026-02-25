@@ -10,10 +10,11 @@
 typedef struct{
 	float **state_buffer;
 	uint32_t *action_buffer;
+	uint8_t *done_buffer;
 	float *log_prob_old_buffer;
 	float *advantage_buffer;
 	float *critic_buffer;
-	float terminal_critic_value;
+	float *terminal_value_buffer;
 }Buffer;
 
 typedef enum {
@@ -39,9 +40,9 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 //finish episode
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done);
 //evaluate returns and advantages
-void evaluate_return(Buffer *buf, uint32_t step_count, uint8_t done);
-float evaluate_advantages(float ret, float value, float mean, float std);
-void normalize_advantage(Buffer *buf, uint32_t step_count);
+void evaluate_return(Buffer *buf, uint32_t step_count);
+void evaluate_advantages(Buffer *buf, uint32_t step_count);
+//void normalize_advantage(Buffer *buf, uint32_t step_count);
 //done function cartpole
 uint8_t done_check(float *state, uint32_t step);
 //reward function

@@ -21,6 +21,7 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim){
     buf->log_prob_old_buffer = NULL;
     buf->advantage_buffer = NULL;
     buf->critic_buffer = NULL;
+    n_steps++; //to prevent limit errors
 
     /* ---------- malloc principali ----------------------------- */
     buf->state_buffer = malloc(n_steps * sizeof(float*));
@@ -28,6 +29,8 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim){
     buf->log_prob_old_buffer = malloc(n_steps * sizeof(float));
     buf->advantage_buffer = malloc(n_steps * sizeof(float));
     buf->critic_buffer = malloc(n_steps * sizeof(float));
+    buf->done_buffer = calloc((n_steps + 1), sizeof(uint8_t));
+	buf->terminal_value_buffer = calloc((n_steps + 1), sizeof(float));
 
     if (!buf->state_buffer || !buf->action_buffer ||
         !buf->log_prob_old_buffer || !buf->advantage_buffer || !buf->critic_buffer)
@@ -125,7 +128,8 @@ uint32_t sample_action(float *p, uint32_t dim){
 }
 
 
-void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, float log_prob, float output_critic, uint32_t step_count, uint32_t obs_dim, uint8_t done){
+void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, float log_prob, float output_critic,
+		uint32_t step_count, uint32_t obs_dim, uint8_t done){
 	if(!done){
 		memcpy(buf->state_buffer[step_count], state, obs_dim * sizeof(float));
 		buf->action_buffer[step_count] = choosen_action;
@@ -144,76 +148,130 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 int step(SharedBackbone *net, float *obs, uint8_t *action, float *reward,
 		uint8_t *done, uint32_t *step_count, Buffer *buffer){
 
-	Head *actor = &net->actor;
-	Head *critic = &net->critic;
-	uint32_t out_dim_actor = actor->layers[actor->num_layers - 1].out_dim;
-	uint32_t out_dim_critic = critic->layers[critic->num_layers - 1].out_dim;
-	//uint32_t dim = net->layers[0].in_dim;
+    // Variabili statiche per mantenere lo stato temporale tra le chiamate
+    // in modo indipendente dal riempimento del buffer.
+    static uint8_t new_episode = 1;
+    static uint32_t ep_step = 0;
 
-	//float *output_forward = malloc(out_dim * sizeof(float));
+	// 1. Assegna il reward all'azione PRECEDENTE
+    // Protezione: assegniamo il reward solo se non stiamo iniziando un nuovo episodio
+	if(!new_episode && *step_count != 0) {
+		*reward = evaluate_reward(obs);
+		buffer->advantage_buffer[*step_count - 1] = *reward;
+	}
+
+	// 2. Controllo Terminazione per lo step ATTUALE
+    // Usiamo ep_step per misurare la lunghezza dell'episodio, non il buffer
+	*done = done_check(obs, ep_step);
+
+	if(*done > 0) {
+		// Assegniamo la morte all'azione PRECEDENTE (che l'ha causata)
+		buffer->done_buffer[*step_count - 1] = *done;
+
+		if(*done == 1) { // Truncated (Timeout) -> Serve il bootstrapping
+			uint32_t out_dim_actor = net->actor.layers[net->actor.num_layers - 1].out_dim;
+			uint32_t out_dim_critic = net->critic.layers[net->critic.num_layers - 1].out_dim;
+			float output_actor[out_dim_actor];
+			float output_critic[out_dim_critic];
+			forward(net, obs, output_actor, output_critic);
+
+            // Salviamo il valore terminale nel buffer dedicato
+			buffer->terminal_value_buffer[*step_count - 1] = output_critic[0];
+		} else { // Terminated (Morto) -> Nessun valore futuro
+			buffer->terminal_value_buffer[*step_count - 1] = 0.0f;
+		}
+
+        // Prepariamoci per la prossima chiamata (il reset dell'ambiente)
+        new_episode = 1;
+        ep_step = 0;
+
+		// RITORNIAMO SENZA INCREMENTARE STEP_COUNT.
+		// L'indice attuale (*step_count) verrà sovrascritto dallo step 0
+		// del NUOVO episodio, evitando buchi temporali nel buffer.
+		return 1;
+	}
+
+	// 3. Se il gioco continua, azzeriamo i flag
+    new_episode = 0;
+	buffer->done_buffer[*step_count] = 0;
+	buffer->terminal_value_buffer[*step_count] = 0.0f;
+
+	// 4. Forward e Selezione Azione
+	uint32_t out_dim_actor = net->actor.layers[net->actor.num_layers - 1].out_dim;
+	uint32_t out_dim_critic = net->critic.layers[net->critic.num_layers - 1].out_dim;
 	float output_actor[out_dim_actor];
 	float output_critic[out_dim_critic];
-	float log_prob = 0.f;
-	//if (!output_forward) return 0; //no RAM available
-
-	if(*step_count != 0) *reward = evaluate_reward(obs); //reward will not be stored for the first step
-	//CHECK DONE BEFORE WASTING TIME SELECTING AN ACTION
-	*done = done_check(obs, *step_count);
-	if(*done == 1){ //Truncated so we do the last forward to check the potential of that state
-		if(!forward(net, obs, output_actor, output_critic)) return 0; //last forward just to save the last V(s) from critic
-		buffer->advantage_buffer[*step_count-1] = *reward; //needed to store only the last step reward
-		buffer->terminal_critic_value = output_critic[0];
-		return 1;
-	}
-	if(*done == 2){ //Terminated it was a bad state we do not compute the forward
-		buffer->advantage_buffer[*step_count-1] = *reward; //needed to store only the last step reward
-		buffer->terminal_critic_value = 0.f;
-		return 1;
-	}
 
 	if(!forward(net, obs, output_actor, output_critic)) return 0;
-	uint32_t a = sample_action(output_actor, out_dim_actor);
+
+    uint32_t a = sample_action(output_actor, out_dim_actor);
 	*action = a;
 
-	//evaluate log_prob_old of the selected action useful for the PPO ratio
 	float action_prob = output_actor[a];
-	log_prob = logf(action_prob + 1e-8f); //Add epsilon 1e-8f to avoid log high values when the argument is near 0
+	float log_prob = logf(action_prob + 1e-8f);
 
-	//-----STORE STEP IN BUFFER-----
-	store_step(buffer, obs, *action, *reward, log_prob, output_critic[0], *step_count, net->layers[0].in_dim, *done);
-	//free(output_forward);
-	*step_count = *step_count + 1;
+	// 5. Salva i dati correnti (il reward lo mettiamo al ciclo dopo)
+	memcpy(buffer->state_buffer[*step_count], obs, net->layers[0].in_dim * sizeof(float));
+	buffer->action_buffer[*step_count] = *action;
+	buffer->log_prob_old_buffer[*step_count] = log_prob;
+	buffer->critic_buffer[*step_count] = output_critic[0];
+
+    // 6. Incrementa i contatori
+	*step_count = *step_count + 1; // Avanza nel buffer globale
+    ep_step++;                     // Avanza nell'episodio corrente
+
 	return 1;
 }
 
-void evaluate_return(Buffer *buf, uint32_t step_count, uint8_t done){
-	float *adv_buf = buf->advantage_buffer;
-	//returns & baseline
-	float G = buf->terminal_critic_value;
-	for (int t = step_count - 1; t >= 0; t--) {
-		float r = adv_buf[t]; //initially adv_buf has raw rewards
-		G = r + GAMMA * G;
-		adv_buf[t] = G;
-	}
-	//normalize returns
-	if(step_count > 2){
-		float mean = 0.0f;
-		for (int t = 0; t < step_count; t++) mean += adv_buf[t];
-			mean /= step_count;
-		for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
+void evaluate_return(Buffer *buf, uint32_t step_count){
+    float *adv_buf = buf->advantage_buffer;
+    float G = 0.0f;
 
-		float var = 0.0f;
-		for (int t = 0; t < step_count; t++) var += adv_buf[t] * adv_buf[t];
-			float std = sqrtf(var / step_count) + 1e-6f;
-		for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
-	}
+    for (int t = step_count - 1; t >= 0; t--) {
+        if (buf->done_buffer[t] == 2) {
+            G = 0.0f; // Morto
+        } else if (buf->done_buffer[t] == 1) {
+            G = buf->terminal_value_buffer[t]; // Troncato, usa il bootstrap salvato
+        }
+
+        float r = adv_buf[t];
+        G = r + GAMMA * G;
+        adv_buf[t] = G;
+    }
 }
 
-float evaluate_advantages(float ret, float value, float mean, float std){
-	float A = ret - value;
-	A -= mean;
-	A /= std;
-	return A;
+void evaluate_advantages(Buffer *buf, uint32_t step_count){
+    float sum_adv = 0.0f;
+    float sum_adv_sq = 0.0f;
+
+    // 1. Calcola l'Advantage grezzo per TUTTO il buffer
+    for(int t = 0; t < step_count; t++){
+        float ret = buf->advantage_buffer[t]; // Contiene Return (R)
+        float v_old = buf->critic_buffer[t];  // Contiene Valore Vecchio (V_old)
+
+        float adv_raw = ret - v_old;          // A = R - V
+
+        // Salviamo temporaneamente l'adv grezzo nel critic_buffer per non perderlo
+        buf->critic_buffer[t] = adv_raw;
+
+        sum_adv += adv_raw;
+        sum_adv_sq += adv_raw * adv_raw;
+    }
+
+    // 2. Calcola Media e Varianza GLOBALI su tutto il batch
+    float mean = sum_adv / (float)step_count;
+    float variance = (sum_adv_sq / (float)step_count) - (mean * mean);
+
+    // Evita radici di numeri negativi a causa di imprecisioni del float
+    float std = sqrtf(variance > 0.0f ? variance : 0.0f) + 1e-8f;
+
+    // 3. Normalizza e Salva
+    for(int t = 0; t < step_count; t++){
+        float adv_raw = buf->critic_buffer[t];
+
+        // Sostituiamo il valore grezzo con quello normalizzato
+        buf->critic_buffer[t] = (adv_raw - mean) / std;
+    }
 }
 
 void evaluate_mean_std(Buffer *buf, uint32_t step_count, float *m, float *s){
@@ -478,10 +536,11 @@ void backward_shared_backbone(SharedBackbone *net, float *grad_from_actor, float
 }
 
 void backward_actor_critic(SharedBackbone *net, float *sensor_input, float *output_actor_new, uint8_t out_dim, float *output_critic_new, float ret_norm,
-		uint8_t action_buf, float old_log_prob, float norm_adv){
+		uint8_t action_buf, float old_log_prob, float norm_adv, int current_batch_size){
 
 	//-----ACTOR LOSS-----
 	float log_prob_new = 0.f;
+	float batch_scale = 1.0f / (float)current_batch_size;
 	//evaluate log_prob_new of the selected action useful for the PPO ratio
 	float action_prob = output_actor_new[action_buf];
 	log_prob_new = logf(action_prob + 1e-8f); //Add epsilon 1e-8f to avoid log high values when the argument is near 0
@@ -506,11 +565,11 @@ void backward_actor_critic(SharedBackbone *net, float *sensor_input, float *outp
 		if(surr1 <= surr2){ //else the gradient is 0 because of the PPO safety clipping
 			if(i == action_buf){
 				//For the choosen action: -(1 - p) * A
-				grad_ppo = -(1.0f - p) * norm_adv;
+				grad_ppo = -(1.0f - p) * norm_adv * ratio;
 			}
 			else{
 				//For other actions: p * A
-				grad_ppo = p * norm_adv;
+				grad_ppo = p * norm_adv * ratio;
 			}
 		}
 		//-----ENTROPY GRADIENT-----
@@ -520,13 +579,13 @@ void backward_actor_critic(SharedBackbone *net, float *sensor_input, float *outp
 
 		// --- C. Somma Finale ---
 		// Questo è il valore che passerai indietro al layer precedente
-		d_logits_actor[i] = grad_ppo + grad_ent;
+		d_logits_actor[i] = (grad_ppo + grad_ent) * batch_scale;
 	}
 
 	//-----CRITIC LOSS-----
 	//float critic_loss_step = powf((output_critic[0] - buf->advantage_buffer[t]), 2);
 	float d_logits_critic[1];
-	for(int i = 0; i < 1; i++) d_logits_critic[i] = CRITIC_COEFF * 2.0f * (output_critic_new[0] - ret_norm);
+	for(int i = 0; i < 1; i++) d_logits_critic[i] = (CRITIC_COEFF * 2.0f * (output_critic_new[0] - ret_norm)) * batch_scale;
 
 	//POSSO CHIAMARE UN'UNICA FUNZIONE PER ENTRAMBE DOVE DENTRO IN MODO SEPARATO CALCOLO LE DERIVATE E L'ACCUMULO
 	//POI SOMMO GLI ACCUMULI FINALI (ACTOR E CRITIC CON SHARED DEVONO AVERE STESSO LAYER INIZIALE) E LI PASSO ALLO SHARED PER LA PARTE FINALE
@@ -542,36 +601,13 @@ void backward_actor_critic(SharedBackbone *net, float *sensor_input, float *outp
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
     if (step_count == 0) return 1;
 
-    // --- FASE 1: PRE-CALCOLO (Una volta sola per episodio) ---
+    // --- FASE 1: PRE-CALCOLO (Una volta sola per episodio/buffer) ---
 
     // 1. Calcola i Returns (R) e li mette in advantage_buffer
-    evaluate_return(buf, step_count, done);
+    evaluate_return(buf, step_count);
 
-    // 2. Calcola Mean e Std dell'Advantage (A = R - V_old)
-    float sum_adv = 0;
-    float sum_adv_sq = 0;
-
-    for(int t = 0; t < step_count; t++){
-        float ret = buf->advantage_buffer[t]; // Contiene Return (R)
-        float v_old = buf->critic_buffer[t];  // Contiene Valore Vecchio (V_old)
-        float adv = ret - v_old;
-
-        sum_adv += adv;
-        sum_adv_sq += adv * adv;
-    }
-
-    float mean = sum_adv / step_count;
-    float std = sqrtf((sum_adv_sq / step_count) - (mean * mean) + 1e-9f);
-
-    // 3. Normalizza e Salva (Riutilizzo RAM)
-    // Usiamo critic_buffer per salvare l'Advantage Normalizzato pronto all'uso
-    for(int t = 0; t < step_count; t++){
-        float ret = buf->advantage_buffer[t];
-        float v_old = buf->critic_buffer[t];
-        float adv_raw = ret - v_old;
-
-        buf->critic_buffer[t] = (adv_raw - mean) / std;
-    }
+    // 2. Evaluate Advantages that will be stored into critic buffer to save and reuse memory
+    evaluate_advantages(buf, step_count);
 
     // --- FASE 2: TRAINING LOOP (PPO) ---
 
@@ -582,40 +618,71 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, u
     uint8_t out_dim_critic = net->critic.layers[net->critic.num_layers-1].out_dim;
     float output_critic[out_dim_critic];
 
+    // --- NUOVA LOGICA: Impostazioni Mini-Batch ---
+
+    // Alloca l'array degli indici (usiamo un VLA - Variable Length Array)
+    int indices[step_count];
+    for (int i = 0; i < step_count; i++) {
+        indices[i] = i;
+    }
+
     for(int epoch = 0; epoch < N_EPOCHS; epoch++){
 
-        // Reset dei gradienti all'inizio di ogni epoca
-        zero_grad(net);
-
-        for(int t = 0; t < step_count; t++){
-            // Recupera lo stato grezzo dal buffer
-            float *state = buf->state_buffer[t];
-
-            // Forward Pass: Calcola probabilità e valori correnti
-            forward(net, state, output_actor, output_critic);
-
-            // Recupera i dati pre-calcolati
-            float normalized_advantage = buf->critic_buffer[t];     // A_norm (per Actor)
-            float return_target = buf->advantage_buffer[t];         // R (per Critic)
-            float old_log_prob = buf->log_prob_old_buffer[t];
-            uint8_t action = (uint8_t)buf->action_buffer[t];
-
-            // Backward Pass
-            backward_actor_critic(
-                net,
-                state,              // <--- CORRETTO: Passiamo lo stato originale (Input Sensori)
-                output_actor,       // output_actor_new
-                out_dim_actor,      // out_dim
-                output_critic,      // output_critic_new
-                return_target,      // ret_norm (Target del Critic)
-                action,             // action_buf
-                old_log_prob,       // old_log_prob
-                normalized_advantage // norm_adv (Advantage per Actor)
-            );
+        // SHUFFLE: Mischia gli indici all'inizio di ogni epoca (Fisher-Yates)
+        for (int i = step_count - 1; i > 0; i--) {
+            int j = rand() % (i + 1);
+            int temp = indices[i];
+            indices[i] = indices[j];
+            indices[j] = temp;
         }
 
-        // Applica le modifiche ai pesi (Adam)
-        adam_optimizer(net);
+        // LOOP DEI MINI-BATCH
+        for(int start = 0; start < step_count; start += BATCH_SIZE){
+
+            int end = start + BATCH_SIZE;
+            if (end > step_count) end = step_count;
+
+            int current_batch_size = end - start;
+
+            // ---> SPOSTATO: Reset dei gradienti per il mini-batch corrente
+            zero_grad(net);
+
+            // LOOP SUI SINGOLI CAMPIONI DEL MINI-BATCH
+            for(int b = start; b < end; b++){
+
+                // Prendi l'indice randomizzato
+                int t = indices[b];
+
+                // Recupera lo stato grezzo dal buffer usando l'indice 't'
+                float *state = buf->state_buffer[t];
+
+                // Forward Pass: Calcola probabilità e valori correnti
+                forward(net, state, output_actor, output_critic);
+
+                // Recupera i dati pre-calcolati
+                float normalized_advantage = buf->critic_buffer[t];     // A_norm (per Actor)
+                float return_target = buf->advantage_buffer[t];         // R (per Critic)
+                float old_log_prob = buf->log_prob_old_buffer[t];
+                uint8_t action = (uint8_t)buf->action_buffer[t];
+
+                // Backward Pass
+                backward_actor_critic(
+                    net,
+                    state,              // Input Sensori
+                    output_actor,       // output_actor_new
+                    out_dim_actor,      // out_dim
+                    output_critic,      // output_critic_new
+                    return_target,      // ret_norm (Target del Critic)
+                    action,             // action_buf
+                    old_log_prob,       // old_log_prob
+                    normalized_advantage, // norm_adv (Advantage per Actor)
+                    current_batch_size  // <--- NUOVO PARAMETRO PER LA SCALA
+                );
+            }
+
+            // ---> SPOSTATO: Applica le modifiche ai pesi per QUESTO mini-batch
+            adam_optimizer(net);
+        }
     }
 
     return 1;
@@ -690,7 +757,7 @@ float evaluate_reward(float *obs){
 uint8_t done_check(float *state, uint32_t step){
 	if (fabsf(state[0]) > CART_LIMIT) return 2;      //out of bound
 	if (fabsf(state[2]) > POLE_LIMIT) return 2;      //±12°
-	if (step >= STEP_LIMIT){
+	if (step >= MAX_STEPS){
 		return 1;   //timeout
 	}
 	return 0;

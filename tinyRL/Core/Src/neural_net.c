@@ -194,8 +194,8 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
 	//the output become the input for the next layer
 	curr_in = curr_out;
 
-    for (int l = 0; l < actor->num_layers; ++l){
-    	DenseLayer *layer = &actor->layers[l];
+    for (int l = 0; l < critic->num_layers; ++l){
+    	DenseLayer *layer = &critic->layers[l];
     	curr_out = layer->out; //pointer to layer's output
 
 		// fully connected product W·x + b

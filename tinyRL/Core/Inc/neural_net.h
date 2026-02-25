@@ -10,13 +10,14 @@
 #define ENT_BETA 0.001f //0.001 good for CartPole
 #define CRIT_LOSS 0.5
 #define MAX_EPISODE 100
-#define MAX_STEPS 500
+#define MAX_STEPS 1024
+#define BATCH_SIZE 32
 
-#define N_EPOCHS 10
+#define N_EPOCHS 5
 #define EPS_CLIPPING 0.2f
 #define CRITIC_COEFF 0.5F
-#define ENTROPY_W 0.001 //0.001 good for CartPole
-#define PPO_EPSILON 0.2
+//#define ENTROPY_W 0.001 //0.001 good for CartPole
+#define PPO_EPSILON 0.2 //0.2
 
 typedef struct{
 	DenseLayer *layers;

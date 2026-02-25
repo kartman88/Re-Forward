@@ -113,7 +113,7 @@ int main(void)
   int num_layers = 2;
   int num_layers_actor = 2;
   int num_layers_critic = 2;
-  int net_topology[] = {input_size, 64};
+  int net_topology[] = {input_size, 32};
   int net_topology_actor[] = {32, output_size};
   int net_topology_critic[] = {32, 1};
   ActivationType activations[] = {ACT_RELU, ACT_RELU};
@@ -143,19 +143,24 @@ int main(void)
 
   while (1){
 	  if(uart_recv_floats(&huart3, obs, net_topology[0], 50)){
+		  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+		  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
 		  if(step(&net, obs, &action, &reward, &done, &step_count, &buffer)){
 			  uart_send_action(&huart3, action, done, 50);
-			  if(reward >= 450) success_count++;
+			  //if(reward >= 450) success_count++;
 		  }
-		  if(done == 1 || done == 2){
+		  if(step_count >= MAX_STEPS){ //only done=1 because we have to fill the buffer for PPO
+			  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
+			  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+			  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
 			  if(train == 1) finish_episode(&buffer, &net, step_count, done);
-			  if(success_count > 3) train = 0;
+			  //if(success_count > 3) train = 0;
 			  step_count = 0;
 			  num_episode++;
 		  }
 	  }
 	  if(num_episode > MAX_EPISODE){
-		  train = 0;
+		  //train = 0;
 		  //break;
 	  }
     /* USER CODE END WHILE */
