@@ -77,8 +77,14 @@ void zero_grad(NeuralNet *net){
 	//zero grad
 	for (int l = 0; l < net->num_layers; ++l) {
 		DenseLayer *ly = &net->layers[l];
-		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
-		memset(ly->db   , 0, ly->out_dim * sizeof(float));
+
+
+		for (int i = 0; i < ly->out_dim; ++i) {
+			memset(ly->dW[i], 0, ly->in_dim * sizeof(float));
+		}
+
+		// db è un array 1D, quindi memset diretto va bene
+		memset(ly->db, 0, ly->out_dim * sizeof(float));
 	}
 }
 
@@ -130,7 +136,7 @@ void backward_core(NeuralNet *net, float *dout_last, float *input){
 	}
 }
 
-void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward, uint32_t step_count){
+void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward){
 	DenseLayer *last = &net->layers[net->num_layers - 1];
 	float *p = last->out; //softmax prob.0
 
@@ -138,7 +144,7 @@ void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, 
 	float dlogit[last->out_dim];
 	for (int i = 0; i < last->out_dim; ++i){
 		float pi = fmaxf(p[i], 1e-6f); //clamp to avoid NaN values
-		float pg  = ((i == action) ? (1.f - pi) : - pi) * (advantage * reward);
+		float pg  = ((i == action) ? (1.f - pi) : - pi) * advantage; //fixed the advantage was multiplied by the reward
 		float ent = ENT_BETA * (-logf(pi) - 1.f);
 		dlogit[i] = pg + ent;
 }
@@ -171,35 +177,15 @@ void adam_optimizer(NeuralNet *net){
 	}
 }
 
-void gradient_norm_l2(NeuralNet *net){
-	/* ---- gradient-norm (L2) ----------------------------------- */
-	float gnorm_sq = 0.f;
-
+void gradient_norm(NeuralNet *net, uint32_t step_count){
 	for (int l = 0; l < net->num_layers; ++l) {
-	    DenseLayer *ly = &net->layers[l];
-
-	    for (int i = 0; i < ly->out_dim; ++i) {
-	        gnorm_sq += ly->db[i] * ly->db[i];
-	        for (int j = 0; j < ly->in_dim; ++j)
-	            gnorm_sq += ly->dW[i][j] * ly->dW[i][j];
-	    }
-	}
-	float gnorm = sqrtf(gnorm_sq);
-
-	/* ---- clipping --------------------------------------------- */
-	const float CLIP = 5.0f;               /* soglia consigliata */
-
-	if (gnorm > CLIP) {
-	    float s = CLIP / gnorm;            /* fattore di scala */
-
-	    for (int l = 0; l < net->num_layers; ++l) {
-	        DenseLayer *ly = &net->layers[l];
-	        for (int i = 0; i < ly->out_dim; ++i) {
-	            ly->db[i] *= s;
-	            for (int j = 0; j < ly->in_dim; ++j)
-	                ly->dW[i][j] *= s;
-	        }
-	    }
+		DenseLayer *ly = &net->layers[l];
+		for(int i = 0; i < ly->out_dim; ++i){
+			ly->db[i] /= (float)step_count;
+			for(int j = 0; j < ly->in_dim; ++j){
+				ly->dW[i][j] /= (float)step_count;
+			}
+		}
 	}
 }
 

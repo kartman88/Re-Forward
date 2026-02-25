@@ -1,8 +1,8 @@
 ../Core/Src/neural_net.c:6:5:init_network	4
 ../Core/Src/neural_net.c:19:6:softmax	6
 ../Core/Src/neural_net.c:36:5:forward	9
-../Core/Src/neural_net.c:76:6:zero_grad	2
-../Core/Src/neural_net.c:85:6:backward_core	12
-../Core/Src/neural_net.c:133:6:backward_pg	3
-../Core/Src/neural_net.c:149:6:adam_optimizer	5
-../Core/Src/neural_net.c:174:6:gradient_norm_l2	8
+../Core/Src/neural_net.c:76:6:zero_grad	3
+../Core/Src/neural_net.c:91:6:backward_core	12
+../Core/Src/neural_net.c:139:6:backward_pg	3
+../Core/Src/neural_net.c:155:6:adam_optimizer	5
+../Core/Src/neural_net.c:180:6:gradient_norm	4

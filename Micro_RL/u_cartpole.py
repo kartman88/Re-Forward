@@ -58,6 +58,20 @@ def recv_action_done(ser: serial.Serial):
         return (actions[0] if ACTION_DIM == 1 else actions, done_flag)
     return None
 
+def applica_fisica_personalizzata(env, m_pole=0.1, length=0.5):
+    # Accediamo al core dell'ambiente
+    u = env.unwrapped
+    
+    # Sovrascriviamo i parametri base
+    u.masspole = m_pole
+    u.length = length  # Ricorda: è la metà della lunghezza totale
+    
+    # Ricalcoliamo i parametri derivati necessari per le equazioni
+    u.total_mass = u.masspole + u.masscart
+    u.polemass_length = u.masspole * u.length
+    
+    print(f"Fisica aggiornata: Massa Asta={u.masspole}, Lunghezza={u.length*2}m")
+
 # ------------------------------------------------------------
 #  MAIN LOOP
 # ------------------------------------------------------------
@@ -66,6 +80,7 @@ def main():
     print(f"[PC] Serial opened on {PORT} @ {BAUDRATE} baud")
 
     env = gym.make("CartPole-v1", render_mode="human") #CartPole-v1 MountainCar-v0, , render_mode="human"
+    #applica_fisica_personalizzata(env, m_pole=0.5, length=1.0) #m_pole=0.1, length=0.5 default values
 
     episode = 0
     obs, _  = env.reset()

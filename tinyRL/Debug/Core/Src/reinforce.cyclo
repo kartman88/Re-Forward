@@ -4,7 +4,7 @@
 ../Core/Src/reinforce.c:86:5:uart_send_log	1
 ../Core/Src/reinforce.c:106:10:sample_action	4
 ../Core/Src/reinforce.c:125:6:store_step	1
-../Core/Src/reinforce.c:133:5:step	2
-../Core/Src/reinforce.c:151:10:finish_episode	8
-../Core/Src/reinforce.c:217:9:done_check	4
-../Core/Src/reinforce.c:226:7:evaluate_reward	1
+../Core/Src/reinforce.c:133:5:step	4
+../Core/Src/reinforce.c:168:10:finish_episode	8
+../Core/Src/reinforce.c:234:9:done_check	4
+../Core/Src/reinforce.c:243:7:evaluate_reward	1

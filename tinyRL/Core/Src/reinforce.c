@@ -130,22 +130,39 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 }
 
 
-int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t step, uint8_t *action){
-	uint32_t out_dim = net->layers[net->num_layers - 1].out_dim;
-	//uint32_t dim = net->layers[0].in_dim;
+int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t *step_count, uint8_t *action, uint8_t *done){
+    uint32_t out_dim = net->layers[net->num_layers - 1].out_dim;
+    uint32_t in_dim = net->layers[0].in_dim;
 
-	//float *output_forward = malloc(out_dim * sizeof(float));
-	float output_forward[out_dim];
-	//if (!output_forward) return 0; //no RAM available
+    //Immediately check if is a termination state
+    *done = done_check(obs, *step_count);
 
-	if(!forward(net, obs, output_forward)) return 0;
-	uint32_t a = sample_action(output_forward, out_dim);
-	*action = a;
-	//float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
-	//store_step(buf, obs, a, r, step, dim);
+    //Reward goes into the previous step
+    //The current obs is the conseguence of taking the action at t-1
+    if (*step_count > 0) {
+        float r = evaluate_reward(obs);
+        buf->reward_buffer[*step_count - 1] = r;
+    }
 
-	//free(output_forward);
-	return 1;
+    //Exit if episode is terminated
+    if (*done) {
+        return 1;
+    }
+
+    //Forward pass, we choose the action not for a terminal state
+    float output_forward[out_dim];
+    if(!forward(net, obs, output_forward)) return 0;
+
+    uint32_t a = sample_action(output_forward, out_dim);
+    *action = a;
+
+    //Store the state into the buffer
+    memcpy(buf->state_buffer[*step_count], obs, in_dim * sizeof(float));
+    buf->action_buffer[*step_count] = a;
+
+    //Increment step count
+	(*step_count)++;
+    return 1;
 }
 
 uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
@@ -183,12 +200,12 @@ uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
 		uint32_t a = buf->action_buffer[t];
 
 
-		backward_pg(net, state, a, adv, r, step_count);
+		backward_pg(net, state, a, adv, r);
 
 	}
 
 	//Normalize gradient
-	//gradient_norm_l2(net);
+	gradient_norm(net, step_count);
 
 
 	adam_optimizer(net);

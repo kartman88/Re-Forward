@@ -1,5 +1,5 @@
 ../Core/Src/dense_layer.c:12:21:frand	8	static
 ../Core/Src/dense_layer.c:14:5:free_2d	24	static
 ../Core/Src/dense_layer.c:30:5:alloc_2d	40	static
-../Core/Src/dense_layer.c:51:6:init_layer_params	24	static
-../Core/Src/dense_layer.c:67:5:dense_init	24	static
+../Core/Src/dense_layer.c:51:6:init_layer_params	32	static
+../Core/Src/dense_layer.c:76:5:dense_init	24	static

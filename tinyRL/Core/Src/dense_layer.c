@@ -49,18 +49,27 @@ int alloc_2d(float ***matrix, int rows, int cols){
 }
 
 void init_layer_params(DenseLayer *layer){
-    for (int i = 0; i < layer->out_dim; ++i) {
-        for (int j = 0; j < layer->in_dim; ++j){
-            layer->W[i][j] = 0.05f * (frand() - 0.5f);
-        	layer->dW[i][j] = 0.0f;
-            layer->mW[i][j] = 0.0f;
-            layer->vW[i][j] = 0.0f;
-        }
-        layer->b[i] = 0.0f;
-        layer->db[i] = 0.0f;
-        layer->mb[i] = 0.0f;
-        layer->vb[i] = 0.0f;
-    }
+	//Init Xavier Uniform for optimal dynamic
+	//Helps neurons to not shutdown at the beginning
+	float limit = sqrtf(6.0f / (float)(layer->in_dim + layer->out_dim));
+
+	for (int i = 0; i < layer->out_dim; ++i) {
+		for (int j = 0; j < layer->in_dim; ++j){
+			//random value in the range [-limit, +limit]
+			layer->W[i][j] = limit * (frand() * 2.0f - 1.0f);
+
+			//Gradient and adam init to 0
+			layer->dW[i][j] = 0.0f;
+			layer->mW[i][j] = 0.0f;
+			layer->vW[i][j] = 0.0f;
+		}
+
+		//Init bias to 0
+		layer->b[i]  = 0.0f;
+		layer->db[i] = 0.0f;
+		layer->mb[i] = 0.0f;
+		layer->vb[i] = 0.0f;
+	}
 }
 
 

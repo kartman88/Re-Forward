@@ -106,7 +106,7 @@ int main(void)
   //create neural network
   NeuralNet net;
   int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
-  int net_topology[] = {input_size, 16, output_size}; //SCRIVERE FORMULA RISPARMIO MEMORIA
+  int net_topology[] = {input_size, 64, output_size}; //SCRIVERE FORMULA RISPARMIO MEMORIA
   ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
   init_network(&net, num_layers, net_topology, activations);
 
@@ -125,18 +125,9 @@ int main(void)
 
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 
-  int temp = 0;
   while (1){
 	if(uart_recv_floats(&huart2, obs, net_topology[0], 50)){
-		if(temp == 0){
-			temp = 1;
-			//t0 = HAL_GetTick();
-		}
-		if(step(&buffer, &net, obs, step_count, &action)){
-			float r = evaluate_reward(obs); //CONTROLLARE ORDINE REWARD AZIONE
-			store_step(&buffer, obs, action, r, step_count, net.layers[0].in_dim);
-			step_count++;
-			done = done_check(obs, step_count);
+		if(step(&buffer, &net, obs, &step_count, &action, &done)){
 			//send action with usart
 			uart_send_action(&huart2, action, done, 50);
 		}
@@ -151,10 +142,10 @@ int main(void)
 
 	}
 	if(num_episode >= MAX_EPISODE){
-		train = 0; //end training
+		//train = 0; //end training
 		//dt_ms = HAL_GetTick() - t0;
 		//uart_send_log(&huart2, dt_ms, step_count, 50);
-		break;
+		//break;
 	}
     /* USER CODE END WHILE */
 
