@@ -12,6 +12,6 @@
 ../Core/Src/reinforce.c:305:6:backward_core_head	72	static
 ../Core/Src/reinforce.c:386:6:backward_shared_backbone	168	dynamic
 ../Core/Src/reinforce.c:538:6:backward_actor_critic	176	dynamic
-../Core/Src/reinforce.c:601:10:finish_episode	192	dynamic
-../Core/Src/reinforce.c:757:9:done_check	16	static
-../Core/Src/reinforce.c:766:7:evaluate_reward	16	static
+../Core/Src/reinforce.c:601:10:finish_episode	168	dynamic
+../Core/Src/reinforce.c:760:9:done_check	16	static
+../Core/Src/reinforce.c:769:7:evaluate_reward	16	static

@@ -621,10 +621,12 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, u
     // --- NUOVA LOGICA: Impostazioni Mini-Batch ---
 
     // Alloca l'array degli indici (usiamo un VLA - Variable Length Array)
-    int indices[step_count];
-    for (int i = 0; i < step_count; i++) {
-        indices[i] = i;
-    }
+    int *indices = malloc(step_count * sizeof(int));
+	if(indices == NULL) return 0; // Protezione sicurezza
+
+	for (int i = 0; i < step_count; i++) {
+		indices[i] = i;
+	}
 
     for(int epoch = 0; epoch < N_EPOCHS; epoch++){
 
@@ -685,6 +687,7 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, u
         }
     }
 
+	free(indices);
     return 1;
 }
 

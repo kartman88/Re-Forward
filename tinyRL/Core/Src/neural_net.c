@@ -232,25 +232,32 @@ int forward(SharedBackbone *net, float *input, float *output_actor, float *outpu
 void zero_grad(SharedBackbone *net){
 	Head *actor = &net->actor;
 	Head *critic = &net->critic;
-	//zero grad shared backbone
-	for (int l = 0; l < net->num_layers + 2; l++){ //+2 to zero also the actor and critic starting
+
+	// Zero grad shared backbone & link layers
+	for (int l = 0; l < net->num_layers + 2; l++){
 		DenseLayer *ly = &net->layers[l];
-		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
-		memset(ly->db   , 0, ly->out_dim * sizeof(float));
+        for(int i = 0; i < ly->out_dim; i++){
+		    memset(ly->dW[i], 0, ly->in_dim * sizeof(float));
+        }
+		memset(ly->db, 0, ly->out_dim * sizeof(float));
 	}
 
-	//zero grad actor
-	for (int l = 0; l < actor->num_layers; l++){ //+2 to zero also the actor and critic starting
+	// Zero grad actor
+	for (int l = 0; l < actor->num_layers; l++){
 		DenseLayer *ly = &actor->layers[l];
-		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
-		memset(ly->db   , 0, ly->out_dim * sizeof(float));
+        for(int i = 0; i < ly->out_dim; i++){
+		    memset(ly->dW[i], 0, ly->in_dim * sizeof(float));
+        }
+		memset(ly->db, 0, ly->out_dim * sizeof(float));
 	}
 
-	//zero grad actor
-	for (int l = 0; l < critic->num_layers; l++){ //+2 to zero also the actor and critic starting
+	// Zero grad critic
+	for (int l = 0; l < critic->num_layers; l++){
 		DenseLayer *ly = &critic->layers[l];
-		memset(ly->dW[0], 0, ly->out_dim * ly->in_dim * sizeof(float));
-		memset(ly->db   , 0, ly->out_dim * sizeof(float));
+        for(int i = 0; i < ly->out_dim; i++){
+		    memset(ly->dW[i], 0, ly->in_dim * sizeof(float));
+        }
+		memset(ly->db, 0, ly->out_dim * sizeof(float));
 	}
 }
 
