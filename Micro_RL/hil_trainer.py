@@ -10,10 +10,10 @@ from collections import deque
 # --- CONFIGURAZIONE ---
 SERIAL_PORT = '/dev/ttyACM0'  # <-- Modifica con la tua porta (es. COM3, /dev/ttyACM0)
 BAUD_RATE = 115200
-TIMEOUT = 1.0         # Timeout breve: ritenteremo silenziosamente
+TIMEOUT = 1.0         # Timeout per il ciclo di Retry (1 secondo)
 MAX_EPISODES = 2000
 PLOT_EVERY_N_EPISODES = 5
-CONSOLE_LINES = 15    # Quanti episodi mostrare nella dashboard
+CONSOLE_LINES = 5    # Quanti episodi mostrare nella dashboard
 
 def send_observation(ser, obs):
     """Impacchetta 4 float in Little-Endian e invia con STX/ETX"""
@@ -23,17 +23,19 @@ def send_observation(ser, obs):
     ser.flush()
 
 def receive_action(ser):
-    """Aspetta silenziosamente l'STX. Ignora i timeout (il micro sta trainando)."""
-    while True:
-        b = ser.read(1)
-        if len(b) > 0 and b[0] == 0x02: # STX Trovato!
-            break
-        # Se len(b) == 0, la seriale è andata in timeout. 
-        # Il loop continua silenziosamente senza stampare errori.
-            
-    payload = ser.read(3)
-    if len(payload) == 3 and payload[2] == 0x03:
-        return payload[0], payload[1]
+    """
+    Legge la risposta del micro. 
+    Se scatta il timeout (micro in training) o ci sono errori, ritorna None, None.
+    """
+    b = ser.read(1)
+    if len(b) == 0:
+        return None, None # Timeout scattato!
+    
+    if b[0] == 0x02: # STX trovato
+        payload = ser.read(3)
+        if len(payload) == 3 and payload[2] == 0x03:
+            return payload[0], payload[1]
+    
     return None, None
 
 def clear_console():
@@ -65,7 +67,7 @@ def main():
     reward_history = []
     moving_avg_history = []
     moving_avg_queue = deque(maxlen=20)
-    console_history = deque(maxlen=CONSOLE_LINES) # Memoria per la tabella
+    console_history = deque(maxlen=CONSOLE_LINES) 
     
     line_raw, = ax.plot([], [], 'b-', alpha=0.3, label='Reward Grezzo')
     line_avg, = ax.plot([], [], 'r-', linewidth=2, label='Media Mobile (20 ep)')
@@ -81,26 +83,39 @@ def main():
     
     try:
         while episode_count < MAX_EPISODES:
-            send_observation(ser, obs)
             
-            # Cronometriamo quanto ci mette a rispondere
             t_start = time.time()
-            action, stm_done = receive_action(ser)
+            action = None
+            stm_done = None
+            
+            # ==========================================
+            # LOOP ANTI-DEADLOCK (MECCANISMO DI RETRY)
+            # ==========================================
+            send_observation(ser, obs)
+            while True:
+                action, stm_done = receive_action(ser)
+                
+                if action is not None:
+                    break # Ricevuto con successo, usciamo dal ciclo!
+                
+                # Se siamo qui, il receive_action è andato in TIMEOUT.
+                # L'STM32 sta ignorando la seriale perché sta addestrando la rete.
+                # Puliamo i buffer e reinviamo l'osservazione finché non si sveglia!
+                ser.reset_input_buffer()
+                send_observation(ser, obs)
+            # ==========================================
+            
             t_elapsed = time.time() - t_start
             
-            # Se ha impiegato più di mezzo secondo, era impegnato nella Backpropagation!
-            if t_elapsed > 0.5:
+            # Se ha impiegato più di 1 secondo a rispondere, contiamo l'Update!
+            if t_elapsed > 1.0:
                 update_count += 1
                 last_update_time = t_elapsed
-            
-            if action is None:
-                continue # Pacchetto sporco, ritentiamo senza fare rumore
                 
             next_obs, reward, terminated, truncated, _ = env.step(action)
             current_ep_reward += reward
             global_step += 1
             
-            # Sincronizzazione dei fine-episodio tra PC e STM32
             done = terminated or truncated or (stm_done > 0)
             
             if done:
@@ -110,7 +125,6 @@ def main():
                 current_avg = np.mean(moving_avg_queue)
                 moving_avg_history.append(current_avg)
                 
-                # Format riga tabella
                 row = f"{episode_count:8d} | {current_ep_reward:7.1f} | {current_avg:10.1f} | {global_step:9d} | {update_count:9d}"
                 console_history.append(row)
                 
@@ -130,11 +144,9 @@ def main():
                     print(line)
                 print("============================================================")
                 
-                # Reset
                 current_ep_reward = 0
                 obs, _ = env.reset()
                 
-                # Aggiorna il grafico ogni N episodi
                 if episode_count % PLOT_EVERY_N_EPISODES == 0:
                     line_raw.set_xdata(range(len(reward_history)))
                     line_raw.set_ydata(reward_history)
