@@ -23,7 +23,7 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim){
 
     /* ---------- malloc principali ----------------------------- */
     buf->state_buffer   = malloc(n_steps * sizeof(float*));
-    buf->action_buffer  = malloc(n_steps * sizeof(uint32_t));
+    buf->action_buffer  = malloc(n_steps * sizeof(action_t));
     buf->reward_buffer  = malloc(n_steps * sizeof(float));
     buf->advantage_buffer = malloc(n_steps * sizeof(float));
 
@@ -78,9 +78,18 @@ int uart_recv_floats(UART_HandleTypeDef *huart,
     return 1;
 }
 
-int uart_send_action(UART_HandleTypeDef *huart, uint8_t action, uint8_t done, uint32_t timeout){
-	uint8_t frame[] = { 0x02, action, done, 0x03 };
-	return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+int uart_send_action(UART_HandleTypeDef *huart, action_t action, uint8_t done, uint32_t timeout){
+	#if USE_CONTINUOUS_ACTIONS
+		uint8_t frame[7];
+		frame[0] = 0x02; // STX
+		memcpy(&frame[1], &action, sizeof(float)); // Copia i 4 byte del float
+		frame[5] = done;
+		frame[6] = 0x03; // ETX
+		return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+	#else
+		uint8_t frame[] = { 0x02, action, done, 0x03 };
+		return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+	#endif
 }
 
 int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step, uint32_t timeout){
@@ -121,6 +130,25 @@ uint32_t sample_action(float *p, uint32_t dim){
 
 }
 
+// L'azione salvata nel buffer non sarà più un intero (uint8_t/uint32_t) ma un float!
+float sample_continuous_action(float mu, float sigma){
+    // Genera due numeri uniformi tra 0 e 1
+    float u1 = fmaxf(frand(), 1e-7f); // Evita log(0)
+    float u2 = frand();
+
+    // Box-Muller transform per rumore Normale standard N(0,1)
+    float z0 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+
+    // Scala con la nostra media e varianza
+    float action = mu + sigma * z0;
+
+    // (Opzionale) Clamp dell'azione se il tuo motore accetta ad es. solo [-1, 1]
+    if (action > 1.0f) action = 1.0f;
+    if (action < -1.0f) action = -1.0f;
+
+    return action;
+}
+
 
 void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, uint32_t step, uint32_t obs_dim){
 
@@ -130,7 +158,7 @@ void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward
 }
 
 
-int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t *step_count, uint8_t *action, uint8_t *done){
+int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t *step_count, action_t *action, uint8_t *done){
     uint32_t out_dim = net->layers[net->num_layers - 1].out_dim;
     uint32_t in_dim = net->layers[0].in_dim;
 
@@ -153,16 +181,21 @@ int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t *step_count, uint8_t 
     float output_forward[out_dim];
     if(!forward(net, obs, output_forward)) return 0;
 
-    uint32_t a = sample_action(output_forward, out_dim);
-    *action = a;
+    action_t a;
+    #if USE_CONTINUOUS_ACTIONS
+        // Usiamo una sigma fissa di 0.5 per esplorare
+        a = sample_continuous_action(output_forward[0], 0.5f);
+    #else
+        a = sample_action(output_forward, out_dim);
+    #endif
 
-    //Store the state into the buffer
-    memcpy(buf->state_buffer[*step_count], obs, in_dim * sizeof(float));
-    buf->action_buffer[*step_count] = a;
+        *action = a;
 
-    //Increment step count
-	(*step_count)++;
-    return 1;
+        memcpy(buf->state_buffer[*step_count], obs, in_dim * sizeof(float));
+        buf->action_buffer[*step_count] = a;
+
+        (*step_count)++;
+        return 1;
 }
 
 uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
@@ -197,7 +230,7 @@ uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
 		forward(net, state, NULL);
 
 		float adv = adv_buf[t];
-		uint32_t a = buf->action_buffer[t];
+		action_t a = buf->action_buffer[t];
 
 
 		backward_pg(net, state, a, adv, r);

@@ -136,21 +136,34 @@ void backward_core(NeuralNet *net, float *dout_last, float *input){
 	}
 }
 
-void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward){
-	DenseLayer *last = &net->layers[net->num_layers - 1];
-	float *p = last->out; //softmax prob.0
+void backward_pg(NeuralNet *net, float *input, action_t action, float advantage, float reward){
+#if USE_CONTINUOUS_ACTIONS
+    DenseLayer *last = &net->layers[net->num_layers - 1];
+    float mu = last->out[0];
+    float sigma = 0.5f; // DEVE essere uguale alla sigma usata nel campionamento!
 
-	//float *dlogit = malloc(last->out_dim * sizeof(float));
-	float dlogit[last->out_dim];
-	for (int i = 0; i < last->out_dim; ++i){
-		float pi = fmaxf(p[i], 1e-6f); //clamp to avoid NaN values
-		float pg  = ((i == action) ? (1.f - pi) : - pi) * advantage; //fixed the advantage was multiplied by the reward
-		float ent = ENT_BETA * (-logf(pi) - 1.f);
-		dlogit[i] = pg + ent;
+    // Calcolo del PG per la Gaussiana
+    float pg = ((action - mu) / (sigma * sigma)) * advantage;
+
+    float dlogit[1];
+    dlogit[0] = pg; // Assumendo attivazione lineare nell'ultimo layer
+
+    backward_core(net, dlogit, input);
+#else
+    DenseLayer *last = &net->layers[net->num_layers - 1];
+    float *p = last->out;
+
+    float dlogit[last->out_dim];
+    for (int i = 0; i < last->out_dim; ++i){
+        float pi = fmaxf(p[i], 1e-6f);
+        float pg  = ((i == action) ? (1.f - pi) : - pi) * advantage;
+        float ent = ENT_BETA * (-logf(pi) - 1.f);
+        dlogit[i] = pg + ent;
+    }
+    backward_core(net, dlogit, input);
+#endif
 }
-	backward_core(net, dlogit, input); //do the rest of the backprop
-	//free(dlogit);
-}
+
 
 void adam_optimizer(NeuralNet *net){
 	//Adam update (ascent)

@@ -2,6 +2,15 @@
 #define NEURAL_NET_H
 #include "dense_layer.h"
 
+//Change this to decide which type of action you use
+#define USE_CONTINUOUS_ACTIONS 0
+
+#if USE_CONTINUOUS_ACTIONS
+	typedef float action_t;
+#else
+	typedef uint8_t action_t;
+#endif
+
 #define LR 0.02f //0.01 and 0.02 good for CartPole
 #define BETA1 0.9f
 #define BETA2 0.999f
@@ -21,7 +30,7 @@ int init_network(NeuralNet *net, int num_layers, int *net_topology, ActivationTy
 void softmax(float *in, float *out, int n);
 int forward(NeuralNet *net, float *input, float *output_final);
 void backward_core(NeuralNet *net, float *dout_last, float *input);
-void backward_pg(NeuralNet *net, float *input, uint8_t action, float advantage, float reward);
+void backward_pg(NeuralNet *net, float *input, action_t action, float advantage, float reward);
 void adam_optimizer(NeuralNet *net);
 void gradient_norm(NeuralNet *net, uint32_t step_count);
 void zero_grad(NeuralNet *net);

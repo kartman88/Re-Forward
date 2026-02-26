@@ -103,11 +103,21 @@ int main(void)
   int input_size = 4;
   int output_size = 2;
   int buffer_size = 500;
+
+#if USE_CONTINUOUS_ACTIONS
+  int output_size = 1; // 1 solo neurone di output (la Media Mu)
+  int net_topology[] = {input_size, 64, output_size};
+  // Usa ACT_NONE o una define per l'attivazione lineare (nessuna attivazione)
+  ActivationType activations[] = {ACT_RELU, ACT_NONE};
+#else
+
+  int net_topology[] = {input_size, 64, output_size};
+  ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
+#endif
+
   //create neural network
   NeuralNet net;
   int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
-  int net_topology[] = {input_size, 64, output_size}; //SCRIVERE FORMULA RISPARMIO MEMORIA
-  ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
   init_network(&net, num_layers, net_topology, activations);
 
   Buffer buffer;
