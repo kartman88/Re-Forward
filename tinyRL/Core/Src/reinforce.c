@@ -143,8 +143,8 @@ float sample_continuous_action(float mu, float sigma){
     float action = mu + sigma * z0;
 
     // (Opzionale) Clamp dell'azione se il tuo motore accetta ad es. solo [-1, 1]
-    if (action > 1.0f) action = 1.0f;
-    if (action < -1.0f) action = -1.0f;
+    if (action > MAX_CONTINUOUS_ACTION) action = 1.0f;
+    if (action < MIN_CONTINUOUS_ACTION) action = -1.0f;
 
     return action;
 }
@@ -263,7 +263,7 @@ float evaluate_reward(float *obs){
 }
 */
 
-/*CODE FOR CARTPOLE*/
+/*CODE FOR CARTPOLE
 uint8_t done_check(float *state, uint32_t step){
 	if (fabsf(state[0]) > CART_LIMIT) return 1;      //out of bound
 	if (fabsf(state[2]) > POLE_LIMIT) return 1;      //±12°
@@ -275,6 +275,40 @@ uint8_t done_check(float *state, uint32_t step){
 
 float evaluate_reward(float *state){
 	return 1.f;
+}*/
+
+/*CODE FOR PENDULUM*/
+uint8_t done_check(float *state, uint32_t step) {
+    // Il documento conferma che non ci sono condizioni di "out of bounds".
+    // Si tronca solo al raggiungimento dei 200 step.
+    if (step >= MAX_STEPS) {
+        return 1;   // Timeout
+    }
+    return 0;
+}
+
+// --- Funzione di Reward ---
+float evaluate_reward(float *state) {
+    // In base alla documentazione (Observation Space), l'array state contiene:
+    // state[0] = x = cos(theta)
+    // state[1] = y = sin(theta)
+    // state[2] = Angular Velocity (theta_dt)
+
+    // 1. Ricaviamo l'angolo theta già normalizzato tra [-pi, pi]
+    float theta = atan2f(state[1], state[0]);
+    float theta_dt = state[2];
+
+    // 2. La coppia (torque).
+    // Come detto in precedenza, la firma della tua funzione non accetta l'azione.
+    // Se non puoi modificare la firma o leggere l'azione, poniamo torque a 0.0f.
+    // Il range valido della torque è tra -2.0 e 2.0.
+    float torque = 0.0f;
+
+    // 3. Applichiamo la formula ESATTA del documento:
+    // r = -(theta^2 + 0.1 * theta_dt^2 + 0.001 * torque^2)
+    float reward = -( (theta * theta) + 0.1f * (theta_dt * theta_dt) + 0.001f * (torque * torque) );
+
+    return reward;
 }
 
 

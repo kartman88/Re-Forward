@@ -8,5 +8,5 @@
 ../Core/Src/reinforce.c:153:6:store_step	1
 ../Core/Src/reinforce.c:161:5:step	4
 ../Core/Src/reinforce.c:201:10:finish_episode	8
-../Core/Src/reinforce.c:267:9:done_check	4
-../Core/Src/reinforce.c:276:7:evaluate_reward	1
+../Core/Src/reinforce.c:281:9:done_check	2
+../Core/Src/reinforce.c:291:7:evaluate_reward	1

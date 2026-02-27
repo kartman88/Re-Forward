@@ -100,24 +100,23 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 
   srand(HAL_GetTick() ^ 0xA5A5A5A5);
-  int input_size = 4;
-  int output_size = 2;
-  int buffer_size = 500;
+  int input_size = 3;
+  int buffer_size = MAX_STEPS;
 
 #if USE_CONTINUOUS_ACTIONS
   int output_size = 1; // 1 solo neurone di output (la Media Mu)
-  int net_topology[] = {input_size, 64, output_size};
+  int net_topology[] = {input_size, 64, 64, output_size};
   // Usa ACT_NONE o una define per l'attivazione lineare (nessuna attivazione)
-  ActivationType activations[] = {ACT_RELU, ACT_NONE};
+  ActivationType activations[] = {ACT_RELU, ACT_RELU, ACT_NONE};
 #else
-
+  int output_size = 2;
   int net_topology[] = {input_size, 64, output_size};
   ActivationType activations[] = {ACT_RELU, ACT_SOFTMAX};
 #endif
 
   //create neural network
   NeuralNet net;
-  int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
+  int num_layers = 3; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
   init_network(&net, num_layers, net_topology, activations);
 
   Buffer buffer;
@@ -125,13 +124,12 @@ int main(void)
   uint32_t step_count = 0;
   uint32_t num_episode = 0;
   uint8_t done = 0;
-  uint8_t action = 0;
+  action_t action = 0;
   float obs[input_size];
   uint8_t train = 1;
 
   /*LOG VARIABLES*/
-  uint32_t t0 = 0; //dwt_ticks();
-  uint32_t dt_ms = 0; //dwt_delta(t0, dwt_ticks());
+
 
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
 

@@ -17,7 +17,7 @@ SEND_PERIOD_MS  = 30              # Pausa per evitare busy-loop (30 ms)
 MAX_WAIT_MS     = 100             # Ritrasmette l'osservazione se non arriva risposta
 
 # --- TOGGLE DISCRETO/CONTINUO ---
-USE_CONTINUOUS_ACTIONS = False     # Metti a False per tornare al CartPole Discreto!
+USE_CONTINUOUS_ACTIONS = True     # Metti a False per tornare al CartPole Discreto!
 
 # Parametri Grafici
 PLOT_EVERY_N_EPISODES = 5

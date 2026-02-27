@@ -3,7 +3,7 @@
 #include "dense_layer.h"
 
 //Change this to decide which type of action you use
-#define USE_CONTINUOUS_ACTIONS 0
+#define USE_CONTINUOUS_ACTIONS 1
 
 #if USE_CONTINUOUS_ACTIONS
 	typedef float action_t;
@@ -11,14 +11,17 @@
 	typedef uint8_t action_t;
 #endif
 
-#define LR 0.02f //0.01 and 0.02 good for CartPole
+#define LR 0.0005f //0.01 and 0.02 good for CartPole
 #define BETA1 0.9f
 #define BETA2 0.999f
 #define EPS_ADAM 1e-8f
 #define GAMMA 0.99f
-#define ENT_BETA 0.001f //0.001 good for cartpole
+#define ENT_BETA 0.01f //0.001 good for cartpole
 #define MAX_EPISODE 100
-#define MAX_STEPS 500
+#define MAX_STEPS 200
+
+#define MAX_CONTINUOUS_ACTION 2.0f
+#define MIN_CONTINUOUS_ACTION -2.0f
 
 typedef struct {
     DenseLayer *layers;
