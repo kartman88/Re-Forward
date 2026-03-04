@@ -1,811 +1,1027 @@
 #include "reinforce.h"
 #include "utils.h"
 
-//CARTPOLE
-#define CART_LIMIT 2.4f                 /* ±2.4 m */
-#define POLE_LIMIT 0.20943951f          /* ±12°   */
+// CARTPOLE
+#define CART_LIMIT 2.4f        /* ±2.4 m */
+#define POLE_LIMIT 0.20943951f /* ±12°   */
 #define STEP_LIMIT 500
 
-//ACROBOT
-#define HEIGHT_THRESHOLD  1.0f
+// ACROBOT
+#define HEIGHT_THRESHOLD 1.0f
 
+static inline float frand(void) { return (float)rand() / RAND_MAX; }
 
+int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim) {
+  /* azzera i campi così, in caso di errore, i free sono sicuri */
+  buf->state_buffer = NULL;
+  buf->action_buffer = NULL;
+  buf->log_prob_old_buffer = NULL;
+  buf->advantage_buffer = NULL;
+  buf->critic_buffer = NULL;
+  buf->sigma_buffer = NULL;
+  n_steps++; // to prevent limit errors
 
-static inline float frand(void) { return (float)rand() / RAND_MAX;}
+  /* ---------- malloc principali ----------------------------- */
+  buf->state_buffer = malloc(n_steps * sizeof(float *));
+  buf->action_buffer = malloc(n_steps * sizeof(action_t));
+  buf->log_prob_old_buffer = malloc(n_steps * sizeof(float));
+  buf->advantage_buffer = malloc(n_steps * sizeof(float));
+  buf->critic_buffer = malloc(n_steps * sizeof(float));
+  buf->done_buffer = calloc((n_steps + 1), sizeof(uint8_t));
+  buf->terminal_value_buffer = calloc((n_steps + 1), sizeof(float));
+  buf->sigma_buffer = malloc(n_steps * sizeof(float));
 
+  if (!buf->state_buffer || !buf->action_buffer || !buf->log_prob_old_buffer ||
+      !buf->advantage_buffer || !buf->critic_buffer || !buf->sigma_buffer)
+    goto fail;
 
-int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim){
-    /* azzera i campi così, in caso di errore, i free sono sicuri */
-    buf->state_buffer = NULL;
-    buf->action_buffer = NULL;
-    buf->log_prob_old_buffer = NULL;
-    buf->advantage_buffer = NULL;
-    buf->critic_buffer = NULL;
-    n_steps++; //to prevent limit errors
+  /* righe per la matrice delle osservazioni */
+  for (uint32_t i = 0; i < n_steps; ++i) {
+    buf->state_buffer[i] = malloc(obs_dim * sizeof(float));
+    if (!buf->state_buffer[i])
+      goto fail;
+  }
+  return 1; /* tutto OK */
 
-    /* ---------- malloc principali ----------------------------- */
-    buf->state_buffer = malloc(n_steps * sizeof(float*));
-    buf->action_buffer = malloc(n_steps * sizeof(uint32_t));
-    buf->log_prob_old_buffer = malloc(n_steps * sizeof(float));
-    buf->advantage_buffer = malloc(n_steps * sizeof(float));
-    buf->critic_buffer = malloc(n_steps * sizeof(float));
-    buf->done_buffer = calloc((n_steps + 1), sizeof(uint8_t));
-	buf->terminal_value_buffer = calloc((n_steps + 1), sizeof(float));
+fail: /* qualsiasi malloc fallita → libera e segnala errore */
+  if (buf->state_buffer) {
+    for (uint32_t i = 0; i < n_steps; ++i)
+      free(buf->state_buffer[i]);
+    free(buf->state_buffer);
+  }
+  free(buf->action_buffer);
+  free(buf->log_prob_old_buffer);
+  free(buf->advantage_buffer);
+  free(buf->critic_buffer);
+  free(buf->sigma_buffer);
+  return 0;
+}
 
-    if (!buf->state_buffer || !buf->action_buffer ||
-        !buf->log_prob_old_buffer || !buf->advantage_buffer || !buf->critic_buffer)
-        goto fail;
+int uart_recv_floats(UART_HandleTypeDef *huart, float *dst, size_t dim,
+                     uint32_t timeout) {
+  const size_t nbytes = dim * sizeof(float);
+  uint8_t byte;
+  uint8_t buf[nbytes]; /* dim=4*4 */
+  uint32_t t0 = HAL_GetTick();
 
-    /* righe per la matrice delle osservazioni */
-    for (uint32_t i = 0; i < n_steps; ++i) {
-        buf->state_buffer[i] = malloc(obs_dim * sizeof(float));
-        if (!buf->state_buffer[i])
-            goto fail;
+  /* 1. Cerca lo STX ------------------------------------------------ */
+  do {
+    if (HAL_UART_Receive(huart, &byte, 1, 1) != HAL_OK) {
+      if (HAL_GetTick() - t0 > timeout)
+        return 0; /* timeout totale */
+      continue;   /* riprova */
     }
-    return 1;                       /* tutto OK */
+  } while (byte != 0x02);
 
-    fail:   /* qualsiasi malloc fallita → libera e segnala errore */
-		if (buf->state_buffer) {
-			for (uint32_t i = 0; i < n_steps; ++i)
-				free(buf->state_buffer[i]);
-			free(buf->state_buffer);
-		}
-		free(buf->action_buffer);
-		free(buf->log_prob_old_buffer);
-		free(buf->advantage_buffer);
-		free(buf->critic_buffer);
-		return 0;
+  /* 2. Legge esattamente nbytes + ETX ------------------------------ */
+  if (HAL_UART_Receive(huart, buf, nbytes, timeout) != HAL_OK)
+    return 0;
+  if (HAL_UART_Receive(huart, &byte, 1, timeout) != HAL_OK)
+    return 0;
+  if (byte != 0x03)
+    return 0;
+
+  memcpy(dst, buf, nbytes); /* OK: frame completo */
+  return 1;
 }
 
-int uart_recv_floats(UART_HandleTypeDef *huart,
-                     float             *dst,
-                     size_t             dim,
-                     uint32_t           timeout)
-{
-    const size_t nbytes = dim * sizeof(float);
-    uint8_t byte;
-    uint8_t buf[nbytes];                 /* dim=4*4 */
-    uint32_t t0 = HAL_GetTick();
-
-    /* 1. Cerca lo STX ------------------------------------------------ */
-    do {
-        if (HAL_UART_Receive(huart, &byte, 1, 1) != HAL_OK) {
-            if (HAL_GetTick() - t0 > timeout) return 0; /* timeout totale */
-            continue;                                   /* riprova */
-        }
-    } while (byte != 0x02);
-
-    /* 2. Legge esattamente nbytes + ETX ------------------------------ */
-    if (HAL_UART_Receive(huart, buf, nbytes, timeout) != HAL_OK) return 0;
-    if (HAL_UART_Receive(huart, &byte, 1, timeout) != HAL_OK) return 0;
-    if (byte != 0x03)                                            return 0;
-
-    memcpy(dst, buf, nbytes);             /* OK: frame completo */
-    return 1;
+int uart_send_action(UART_HandleTypeDef *huart, action_t action, uint8_t done,
+                     uint32_t timeout) {
+#if USE_CONTINUOUS_ACTIONS
+  uint8_t frame[7];
+  frame[0] = 0x02; // STX
+  memcpy(&frame[1], &action, sizeof(float));
+  frame[5] = done;
+  frame[6] = 0x03; // ETX
+  return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+#else
+  uint8_t frame[] = {0x02, action, done, 0x03};
+  return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+#endif
 }
 
-int uart_send_action(UART_HandleTypeDef *huart, uint8_t action, uint8_t done, uint32_t timeout){
-	uint8_t frame[] = { 0x02, action, done, 0x03 };
-	return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step,
+                  uint32_t timeout) {
+  uint8_t frame[10];
+  frame[0] = 0x01; // STX
+
+  frame[1] = (uint8_t)(dt >> 24); // MSB
+  frame[2] = (uint8_t)(dt >> 16);
+  frame[3] = (uint8_t)(dt >> 8);
+  frame[4] = (uint8_t)(dt >> 0); // LSB
+
+  frame[5] = (uint8_t)(step >> 24);
+  frame[6] = (uint8_t)(step >> 16);
+  frame[7] = (uint8_t)(step >> 8);
+  frame[8] = (uint8_t)(step >> 0);
+
+  frame[9] = 0x04; // ETX
+  return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
 }
 
-int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step, uint32_t timeout){
-	uint8_t frame[10];
-	frame[0] = 0x01; //STX
+uint32_t sample_action(float *p, uint32_t dim) {
+  const float EPSILON = 0.0f; /* 1 % */
 
-	frame[1] = (uint8_t)(dt >> 24); //MSB
-	frame[2] = (uint8_t)(dt >> 16);
-	frame[3] = (uint8_t)(dt >>  8);
-	frame[4] = (uint8_t)(dt >>  0); //LSB
+  /* ─── 1. esplorazione pura ogni tanto ─── */
+  float r = (float)rand() / (float)RAND_MAX; /* uniform [0,1) */
+  if (r < EPSILON)
+    return (uint8_t)(rand() % dim); /* azione random */
 
-	frame[5] = (uint8_t)(step >> 24);
-	frame[6] = (uint8_t)(step >> 16);
-	frame[7] = (uint8_t)(step >>  8);
-	frame[8] = (uint8_t)(step >>  0);
-
-	frame[9] = 0x04; //ETX
-	return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+  /* ─── 2. campionamento “roulette-wheel” ─── */
+  float c = (float)rand() / (float)RAND_MAX; /* [0,1) */
+  for (uint32_t i = 0; i < dim; ++i) {
+    if (c < p[i])
+      return (uint8_t)i;
+    c -= p[i];
+  }
+  return (uint8_t)(dim - 1); /* fallback numerico */
 }
 
+#if USE_CONTINUOUS_ACTIONS
+float sample_continuous_action(float mu, float sigma) {
+  float u1 = fmaxf((float)rand() / RAND_MAX, 1e-7f);
+  float u2 = (float)rand() / RAND_MAX;
+  float z0 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+  float action = mu + sigma * z0;
 
-
-uint32_t sample_action(float *p, uint32_t dim){
-	const float EPSILON = 0.0f;               /* 1 % */
-
-	/* ─── 1. esplorazione pura ogni tanto ─── */
-	float r = (float)rand() / (float)RAND_MAX; /* uniform [0,1) */
-	if (r < EPSILON)
-		return (uint8_t)(rand() % dim);        /* azione random */
-
-	/* ─── 2. campionamento “roulette-wheel” ─── */
-	float c = (float)rand() / (float)RAND_MAX; /* [0,1) */
-	for (uint32_t i = 0; i < dim; ++i) {
-		if (c < p[i]) return (uint8_t)i;
-		c -= p[i];
-	}
-	return (uint8_t)(dim - 1);                 /* fallback numerico */
-
+  return action;
 }
 
+float gaussian_log_prob(float action, float mu, float sigma) {
+  float var = sigma * sigma;
+  // Formula: -0.5 * log(2 * PI * var) - (x - mu)^2 / (2 * var)
+  return -0.5f * logf(2.0f * (float)M_PI * var) -
+         ((action - mu) * (action - mu)) / (2.0f * var);
+}
+#endif
 
-void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, float log_prob, float output_critic,
-		uint32_t step_count, uint32_t obs_dim, uint8_t done){
-	if(!done){
-		memcpy(buf->state_buffer[step_count], state, obs_dim * sizeof(float));
-		buf->action_buffer[step_count] = choosen_action;
-		buf->log_prob_old_buffer[step_count] = log_prob;
-		buf->critic_buffer[step_count] = output_critic;
-		if(step_count != 0){
-			buf->advantage_buffer[step_count-1] = reward; //reward is the consequence of the previous action
-		}
-	}
-	else{ //if the episode is done the last step reward needs to be buffered
-		buf->advantage_buffer[step_count-1] = reward;
-	}
+int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
+         uint8_t *done, uint32_t *step_count, Buffer *buffer) {
+
+  static uint8_t new_episode = 1;
+  static uint32_t ep_step = 0;
+
+  // =========================================================================
+  // FASE 1: CHIUSURA DELLO STEP PRECEDENTE (t-1)
+  // Qui possediamo l'osservazione futura s_t (risultante da a_t-1)
+  // =========================================================================
+  if (!new_episode && *step_count > 0) {
+    uint32_t prev_t = *step_count - 1;
+
+    // 1. Assegna il Reward dell'azione a_{t-1} valutata in s_t
+    action_t prev_a = buffer->action_buffer[prev_t];
+    *reward = evaluate_reward(obs, prev_a);
+    buffer->advantage_buffer[prev_t] = *reward;
+
+    // 2. Controllo Terminazione (avvenuta in s_t a causa di a_t-1)
+    *done = done_check(obs, ep_step);
+
+    if (*done > 0) {
+      buffer->done_buffer[prev_t] = *done;
+
+      // BOOTSTRAP: Se Troncato (timeout), serve il V(s_t) futuro
+      if (*done == 1) {
+        uint32_t out_dim_actor =
+            net->actor.layers[net->actor.num_layers - 1].out_dim;
+        uint32_t out_dim_critic =
+            net->critic.layers[net->critic.num_layers - 1].out_dim;
+        float output_actor[out_dim_actor];
+        float output_critic[out_dim_critic];
+
+        forward(net, obs, output_actor, output_critic);
+        buffer->terminal_value_buffer[prev_t] = output_critic[0];
+      } else {
+        // Terminated: valore futuro è intrinsecamente 0
+        buffer->terminal_value_buffer[prev_t] = 0.0f;
+      }
+
+      // Prepara le variabili fisiche e logiche per il reset sim-to-real
+      new_episode = 1;
+      ep_step = 0;
+
+      // Ritorniamo *senza* incrementare step_count.
+      // Il prossimo passo ricomincerà scrivendo allo stesso indice pulito.
+      return 1;
+    }
+  }
+
+  // =========================================================================
+  // FASE 2: GESTIONE RIEMPIMENTO BUFFER
+  // =========================================================================
+  if (*step_count >= MAX_STEPS) {
+    // Abbiamo raccolto tutto il possibile, informiamo il main in modo da
+    // avviare l'aggiornamento e resettare l'ambiente all'episodio successivo
+    *done = 1;
+    new_episode = 1;
+    ep_step = 0;
+    return 2; // Trigger training code
+  }
+
+  // =========================================================================
+  // FASE 3: ELABORAZIONE DELLO STEP CORRENTE (t)
+  // =========================================================================
+  new_episode = 0; // Se eravamo in un nuovo episodio, ora non lo siamo più
+
+  // Inizializza i flag futuri per sicurezza e ripulisce il ritorno per il main
+  *done = 0;
+  buffer->done_buffer[*step_count] = 0;
+  buffer->terminal_value_buffer[*step_count] = 0.0f;
+
+  uint32_t out_dim_actor = net->actor.layers[net->actor.num_layers - 1].out_dim;
+  uint32_t out_dim_critic =
+      net->critic.layers[net->critic.num_layers - 1].out_dim;
+  float output_actor[out_dim_actor];
+  float output_critic[out_dim_critic];
+
+  if (!forward(net, obs, output_actor, output_critic))
+    return 0;
+
+  action_t a;
+  float log_prob;
+
+#if USE_CONTINUOUS_ACTIONS
+  float progress = (float)net->adam_t / (float)(TOTAL_ADAM_STEPS + 1);
+  if (progress > 1.0f)
+    progress = 1.0f;
+
+  float current_sigma = STARTING_ACTION_SIGMA * (1.0f - progress) + 0.15f;
+  if (current_sigma < 0.15f)
+    current_sigma = 0.15f;
+
+  float mu = output_actor[0];
+  float a_raw = sample_continuous_action(mu, current_sigma);
+
+  // HARD ACTION BOUNDING (Approccio 1):
+  // L'azione esplorativa viene subito clippata rigidamente ai bordi fisici.
+  a = fmaxf(fminf(a_raw, 1.0f), -1.0f);
+  *action = a;
+
+  // IMPORTANTE: Calcoliamo la log_prob e riempiamo il buffer usando l'azione
+  // LIMITATA `a`, non quella grezza. L'Actor deve capire e venire
+  // punito/premiato sulla base dell'azione che si è materializzata davvero
+  // nell'ambiente fisico.
+  log_prob = gaussian_log_prob(a, mu, current_sigma);
+
+  buffer->action_buffer[*step_count] = a;
+  buffer->sigma_buffer[*step_count] = current_sigma;
+#else
+  a = (action_t)sample_action(output_actor, out_dim_actor);
+  float action_prob = output_actor[(uint8_t)a];
+  log_prob = logf(action_prob + 1e-8f);
+  *action = a;
+
+  buffer->action_buffer[*step_count] = a;
+#endif
+
+  // Salva i dati correnti nel buffer allo slot `t`
+  memcpy(buffer->state_buffer[*step_count], obs,
+         net->layers[0].in_dim * sizeof(float));
+  buffer->log_prob_old_buffer[*step_count] = log_prob;
+  buffer->critic_buffer[*step_count] = output_critic[0];
+
+  // Incrementa contatori per prepararsi al passo futuro `t+1`
+  *step_count = *step_count + 1;
+  ep_step++;
+
+  return 1;
 }
 
+void evaluate_advantages_and_returns(Buffer *buf, uint32_t step_count) {
+  float sum_adv = 0.0f;
+  float sum_adv_sq = 0.0f;
+  float gae = 0.0f;
+  float next_v_curr = 0.0f;
 
-int step(SharedBackbone *net, float *obs, uint8_t *action, float *reward,
-		uint8_t *done, uint32_t *step_count, Buffer *buffer){
+  // GAE Lambda parameter (typically 0.95 for PPO)
+  const float lambda = 0.95f;
 
-    // Variabili statiche per mantenere lo stato temporale tra le chiamate
-    // in modo indipendente dal riempimento del buffer.
-    static uint8_t new_episode = 1;
-    static uint32_t ep_step = 0;
+  // 1. Calculate GAE and Returns for the whole buffer
+  for (int t = step_count - 1; t >= 0; t--) {
+    float r = buf->advantage_buffer[t];   // Contains immediate Reward (R)
+    float v_curr = buf->critic_buffer[t]; // Current Value V(s_t)
 
-	// 1. Assegna il reward all'azione PRECEDENTE
-    // Protezione: assegniamo il reward solo se non stiamo iniziando un nuovo episodio
-	if(!new_episode && *step_count != 0) {
-		*reward = evaluate_reward(obs);
-		buffer->advantage_buffer[*step_count - 1] = *reward;
-	}
+    // Next value V(s_{t+1})
+    float v_next = 0.0f;
+    if (t == step_count - 1) {
+      v_next = buf->terminal_value_buffer[t];
+    } else {
+      // If the next step is a new episode or terminated, v_next is 0
+      if (buf->done_buffer[t] == 2)
+        v_next = 0.0f;
+      else if (buf->done_buffer[t] == 1)
+        v_next = buf->terminal_value_buffer[t];
+      else
+        v_next = next_v_curr;
+    }
 
-	// 2. Controllo Terminazione per lo step ATTUALE
-    // Usiamo ep_step per misurare la lunghezza dell'episodio, non il buffer
-	*done = done_check(obs, ep_step);
+    // TD Error: delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
+    float delta = r + GAMMA * v_next - v_curr;
 
-	if(*done > 0) {
-		// Assegniamo la morte all'azione PRECEDENTE (che l'ha causata)
-		buffer->done_buffer[*step_count - 1] = *done;
+    // Reset GAE if episode ends at this step
+    if (buf->done_buffer[t] > 0) {
+      gae =
+          0.0f; // No future advantages flow backwards across episode boundaries
+    }
 
-		if(*done == 1) { // Truncated (Timeout) -> Serve il bootstrapping
-			uint32_t out_dim_actor = net->actor.layers[net->actor.num_layers - 1].out_dim;
-			uint32_t out_dim_critic = net->critic.layers[net->critic.num_layers - 1].out_dim;
-			float output_actor[out_dim_actor];
-			float output_critic[out_dim_critic];
-			forward(net, obs, output_actor, output_critic);
+    // GAE: A_t = delta_t + gamma * lambda * A_{t+1}
+    gae = delta + GAMMA * lambda * gae;
 
-            // Salviamo il valore terminale nel buffer dedicato
-			buffer->terminal_value_buffer[*step_count - 1] = output_critic[0];
-		} else { // Terminated (Morto) -> Nessun valore futuro
-			buffer->terminal_value_buffer[*step_count - 1] = 0.0f;
-		}
+    // Store Return into advantage_buffer (Return = GAE + V_curr)
+    buf->advantage_buffer[t] = gae + v_curr;
 
-        // Prepariamoci per la prossima chiamata (il reset dell'ambiente)
-        new_episode = 1;
-        ep_step = 0;
+    // Temporarily store raw GAE in critic_buffer
+    buf->critic_buffer[t] = gae;
 
-		// RITORNIAMO SENZA INCREMENTARE STEP_COUNT.
-		// L'indice attuale (*step_count) verrà sovrascritto dallo step 0
-		// del NUOVO episodio, evitando buchi temporali nel buffer.
-		return 1;
-	}
+    // Save current value for the next iteration (t-1 evaluates t as t+1)
+    next_v_curr = v_curr;
 
-	// 3. Se il gioco continua, azzeriamo i flag
-    new_episode = 0;
-	buffer->done_buffer[*step_count] = 0;
-	buffer->terminal_value_buffer[*step_count] = 0.0f;
+    sum_adv += gae;
+    sum_adv_sq += gae * gae;
+  }
 
-	// 4. Forward e Selezione Azione
-	uint32_t out_dim_actor = net->actor.layers[net->actor.num_layers - 1].out_dim;
-	uint32_t out_dim_critic = net->critic.layers[net->critic.num_layers - 1].out_dim;
-	float output_actor[out_dim_actor];
-	float output_critic[out_dim_critic];
+  // 2. Calculate Global Mean and Variance
+  float mean = sum_adv / (float)step_count;
+  float variance = (sum_adv_sq / (float)step_count) - (mean * mean);
 
-	if(!forward(net, obs, output_actor, output_critic)) return 0;
+  // Prevent sqrt of negative number
+  float std = sqrtf(variance > 0.0f ? variance : 0.0f) + 1e-8f;
 
-    uint32_t a = sample_action(output_actor, out_dim_actor);
-	*action = a;
-
-	float action_prob = output_actor[a];
-	float log_prob = logf(action_prob + 1e-8f);
-
-	// 5. Salva i dati correnti (il reward lo mettiamo al ciclo dopo)
-	memcpy(buffer->state_buffer[*step_count], obs, net->layers[0].in_dim * sizeof(float));
-	buffer->action_buffer[*step_count] = *action;
-	buffer->log_prob_old_buffer[*step_count] = log_prob;
-	buffer->critic_buffer[*step_count] = output_critic[0];
-
-    // 6. Incrementa i contatori
-	*step_count = *step_count + 1; // Avanza nel buffer globale
-    ep_step++;                     // Avanza nell'episodio corrente
-
-	return 1;
+  // 3. Normalize and Save
+  for (int t = 0; t < step_count; t++) {
+    float adv_raw = buf->critic_buffer[t];
+    // Replace raw with normalized advantage
+    buf->critic_buffer[t] = (adv_raw - mean) / std;
+  }
 }
 
-void evaluate_return(Buffer *buf, uint32_t step_count){
+void evaluate_mean_std(Buffer *buf, uint32_t step_count, float *m, float *s) {
+  if (step_count > 2) {
     float *adv_buf = buf->advantage_buffer;
-    float G = 0.0f;
+    // adv normalization
+    float mean = 0.0f;
+    for (int t = 0; t < step_count; t++)
+      mean += adv_buf[t];
+    mean /= step_count;
+    *m = mean;
+    // for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
 
-    for (int t = step_count - 1; t >= 0; t--) {
-        if (buf->done_buffer[t] == 2) {
-            G = 0.0f; // Morto
-        } else if (buf->done_buffer[t] == 1) {
-            G = buf->terminal_value_buffer[t]; // Troncato, usa il bootstrap salvato
-        }
-
-        float r = adv_buf[t];
-        G = r + GAMMA * G;
-        adv_buf[t] = G;
-    }
+    float var = 0.0f;
+    for (int t = 0; t < step_count; t++)
+      var += adv_buf[t] * adv_buf[t];
+    float std = sqrtf(var / step_count) + 1e-6f;
+    *s = std;
+    // for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
+  }
 }
 
-void evaluate_advantages(Buffer *buf, uint32_t step_count){
-    float sum_adv = 0.0f;
-    float sum_adv_sq = 0.0f;
-
-    // 1. Calcola l'Advantage grezzo per TUTTO il buffer
-    for(int t = 0; t < step_count; t++){
-        float ret = buf->advantage_buffer[t]; // Contiene Return (R)
-        float v_old = buf->critic_buffer[t];  // Contiene Valore Vecchio (V_old)
-
-        float adv_raw = ret - v_old;          // A = R - V
-
-        // Salviamo temporaneamente l'adv grezzo nel critic_buffer per non perderlo
-        buf->critic_buffer[t] = adv_raw;
-
-        sum_adv += adv_raw;
-        sum_adv_sq += adv_raw * adv_raw;
+float evaluate_entropy(float *probs, int n_actions) {
+  float entropy = 0.0f;
+  for (int i = 0; i < n_actions; i++) {
+    if (probs[i] > 1e-8f) { // Avoid log(0) that is -inf
+      entropy -= probs[i] * logf(probs[i]);
     }
-
-    // 2. Calcola Media e Varianza GLOBALI su tutto il batch
-    float mean = sum_adv / (float)step_count;
-    float variance = (sum_adv_sq / (float)step_count) - (mean * mean);
-
-    // Evita radici di numeri negativi a causa di imprecisioni del float
-    float std = sqrtf(variance > 0.0f ? variance : 0.0f) + 1e-8f;
-
-    // 3. Normalizza e Salva
-    for(int t = 0; t < step_count; t++){
-        float adv_raw = buf->critic_buffer[t];
-
-        // Sostituiamo il valore grezzo con quello normalizzato
-        buf->critic_buffer[t] = (adv_raw - mean) / std;
-    }
+  }
+  return entropy;
 }
 
-void evaluate_mean_std(Buffer *buf, uint32_t step_count, float *m, float *s){
-	if(step_count > 2){
-		float *adv_buf = buf->advantage_buffer;
-		//adv normalization
-		float mean = 0.0f;
-		for (int t = 0; t < step_count; t++) mean += adv_buf[t];
-			mean /= step_count;
-		*m = mean;
-		//for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
+void backward_core_head(Head *net, float *dout_last, float *input,
+                        float *accumulate_out) {
+  // backprop of the gradient
+  float *delta = dout_last;
 
-		float var = 0.0f;
-		for (int t = 0; t < step_count; t++) var += adv_buf[t] * adv_buf[t];
-			float std = sqrtf(var / step_count) + 1e-6f;
-		*s = std;
-		//for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
-	}
-}
+  // Buffer dinamico per i calcoli INTERNI (tra i layer della head)
+  static float *delta_buf = NULL;
+  static uint32_t delta_cap = 0;
 
-float evaluate_entropy(float *probs, int n_actions){
-	float entropy = 0.0f;
-	for (int i = 0; i < n_actions; i++){
-		if (probs[i] > 1e-8f) { // Avoid log(0) that is -inf
-			entropy -= probs[i] * logf(probs[i]);
-	    }
-	}
-	return entropy;
-}
+  float *prev = NULL;
 
-void backward_core_head(Head *net, float *dout_last, float *input, float *accumulate_out){
-    // backprop of the gradient
-    float *delta = dout_last;
+  for (int l = net->num_layers - 1; l >= 0; --l) {
+    DenseLayer *ly = &net->layers[l];
 
-    // Buffer dinamico per i calcoli INTERNI (tra i layer della head)
-    static float *delta_buf = NULL;
-    static uint32_t delta_cap = 0;
+    // Se l=0 l'input è quello passato alla funzione, altrimenti è l'out del
+    // layer precedente
+    float *inp = (l == 0)
+                     ? input
+                     : net->layers[l - 1].out; // BUCO ADT: ok logica puntatori
 
-    float *prev = NULL;
+    const int out_dim = ly->out_dim;
+    const int in_dim = ly->in_dim;
+    const float *restrict inp_vec = inp;
+    const float *restrict d = delta;
 
-    for(int l = net->num_layers - 1; l >= 0; --l){
-    	DenseLayer *ly = &net->layers[l];
-
-        // Se l=0 l'input è quello passato alla funzione, altrimenti è l'out del layer precedente
-    	float *inp = (l == 0) ? input : net->layers[l-1].out; // BUCO ADT: ok logica puntatori
-
-        // 1. Accumulate grad (Aggiornamento Pesi e Bias del layer corrente)
-        // Questo passaggio è identico per tutti i layer
-        for (int i = 0; i < ly->out_dim; ++i) {
-            ly->db[i] += delta[i];
-            for (int j = 0; j < ly->in_dim; ++j)
-                ly->dW[i][j] += delta[i] * inp[j];
-        }
-
-        // 2. Prepare next delta (Propagazione all'indietro)
-        // Dobbiamo decidere DOVE scrivere il risultato e SE applicare la derivata dell'attivazione
-
-        float *target_buf = NULL;
-
-        if (l == 0) {
-            // SIAMO ALL'USCITA: Scriviamo nel buffer di output per i linked layers
-            target_buf = accumulate_out;
-        } else {
-            // SIAMO DENTRO LA HEAD: Usiamo il buffer temporaneo
-            // memory optimization (tua logica originale)
-            if (ly->in_dim > delta_cap){
-                free(delta_buf);
-                delta_buf  = malloc(ly->in_dim * sizeof(float));
-                delta_cap  = ly->in_dim;
-                if (!delta_buf) return; // Gestione errore
-            }
-            target_buf = delta_buf;
-        }
-
-        // Se abbiamo un buffer valido dove scrivere (accumulate_out non deve essere NULL)
-        if (target_buf != NULL) {
-            prev = target_buf;
-
-            for(int j = 0; j < ly->in_dim; ++j){
-                float acc = 0.0f;
-
-                // A. Calcolo parte lineare (Moltiplicazione matriciale Delta * W trasposta)
-                for(int i = 0; i < ly->out_dim; ++i){
-                    acc += delta[i] * ly->W[i][j];
-                }
-
-                // B. Gestione Derivata Attivazione
-                if (l > 0) {
-                    // Caso INTERNO: Dobbiamo derivare l'attivazione del layer precedente (l-1)
-                    // che appartiene ancora a questa Head.
-                    float h_prev = net->layers[l-1].out[j];
-                    switch(net->layers[l-1].activation){
-                        case ACT_RELU: acc = (h_prev > 0.f) ? acc : 0.f; break;
-                        default: break; // TODO ACT_NONE etc...
-                    }
-                }
-                else {
-                    // Caso USCITA (l == 0): Stiamo uscendo verso lo Shared/Linked.
-                    // NON applichiamo la derivata dell'attivazione qui.
-                    // Passiamo il gradiente "lineare" puro. La derivata dell'attivazione
-                    // che ha generato 'input' verrà fatta nella funzione dello shared.
-                }
-
-                prev[j] = acc;
-            }
-            // Aggiorniamo delta per il prossimo giro (solo se non siamo alla fine)
-            delta = prev;
-        }
-    }
-}
-
-void backward_shared_backbone(SharedBackbone *net, float *grad_from_actor, float *grad_from_critic, float *sensor_input) {
-
-    // --- MAPPING DEI LAYER ---
-    // Assumiamo la struttura che abbiamo concordato:
-    // layers[0]: Shared Trunk (Output usato da Link Actor e Link Critic)
-    // layers[1]: Link Actor (Input: Trunk Out -> Output: Actor Head In)
-    // layers[2]: Link Critic (Input: Trunk Out -> Output: Critic Head In)
-
-    // Attenzione: verifica che net->num_layers sia gestito coerentemente.
-    // Qui uso indici fissi per chiarezza, ma potresti volerlo parametrizzare.
-    DenseLayer *trunk       = &net->layers[0];
-    DenseLayer *link_actor  = &net->layers[1];
-    DenseLayer *link_critic = &net->layers[2];
-
-    // Buffer per l'accumulo che scende verso il tronco (dL/da del tronco)
-    // Lo inizializziamo a 0 perché ci sommeremo dentro due contributi.
-    // WARNING: Verifica che lo stack supporti questa dimensione (VLA)
-    float trunk_grad_accum[trunk->out_dim];
-    memset(trunk_grad_accum, 0, trunk->out_dim * sizeof(float));
-
-    // ============================================================
-    // FASE 1: BACKPROP SU LINK ACTOR (Layer 1)
-    // ============================================================
-    {
-        float *delta = grad_from_actor; // Questo è dL/da (gradiente rispetto all'output)
-        float *input = trunk->out;      // Input ricevuto nella forward pass
-
-        for (int i = 0; i < link_actor->out_dim; i++) {
-            // A. Derivata dell'attivazione (dL/da -> dL/dz)
-            // Trasformiamo il gradiente "grezzo" in "delta" locale
-            float out_val = link_actor->out[i]; // TODO: Verificare se l'attivazione serve pre o post
-
-            switch (link_actor->activation) {
-                case ACT_RELU:
-                    delta[i] = (out_val > 0.0f) ? delta[i] : 0.0f;
-                    break;
-                /*case ACT_TANH: // Esempio
-                    delta[i] = delta[i] * (1.0f - out_val * out_val);
-                    break;*/
-                case ACT_NONE:
-                default:
-                    // delta rimane invariato
-                    break;
-            }
-
-            // B. Aggiornamento Pesi (dW) e Bias (db)
-            link_actor->db[i] += delta[i];
-            for (int j = 0; j < link_actor->in_dim; j++) {
-                link_actor->dW[i][j] += delta[i] * input[j];
-            }
-        }
-
-        // C. Calcolo Accumulo verso il Tronco (W^T * delta)
-        for (int j = 0; j < link_actor->in_dim; j++) {
-            float acc = 0.0f;
-            for (int i = 0; i < link_actor->out_dim; i++) {
-                acc += delta[i] * link_actor->W[i][j];
-            }
-            // Scriviamo nel buffer comune (PRIMA SCRITTURA o +=, qui è 0 all'inizio quindi += va bene)
-            trunk_grad_accum[j] += acc;
-        }
+    // 1. Accumulate grad (Aggiornamento Pesi e Bias del layer corrente)
+    float *restrict db = ly->db;
+    for (int i = 0; i < out_dim; ++i) {
+      db[i] += d[i];
+      float *restrict dw_row = ly->dW[i];
+      float di = d[i];
+      for (int j = 0; j < in_dim; ++j) {
+        dw_row[j] += di * inp_vec[j];
+      }
     }
 
-    // ============================================================
-    // FASE 2: BACKPROP SU LINK CRITIC (Layer 2)
-    // ============================================================
-    {
-        float *delta = grad_from_critic;
-        float *input = trunk->out;
+    // 2. Prepare next delta (Propagazione all'indietro)
+    // Dobbiamo decidere DOVE scrivere il risultato e SE applicare la derivata
+    // dell'attivazione
 
-        for (int i = 0; i < link_critic->out_dim; i++) {
-            // A. Derivata Attivazione
-            float out_val = link_critic->out[i];
+    float *target_buf = NULL;
 
-            switch (link_critic->activation) {
-                case ACT_RELU:
-                    delta[i] = (out_val > 0.0f) ? delta[i] : 0.0f;
-                    break;
-                // ... altri casi ...
-                default: break;
-            }
-
-            // B. Aggiornamento Pesi
-            link_critic->db[i] += delta[i];
-            for (int j = 0; j < link_critic->in_dim; j++) {
-                link_critic->dW[i][j] += delta[i] * input[j];
-            }
-        }
-
-        // C. Calcolo Accumulo verso il Tronco (SOMMA)
-        for (int j = 0; j < link_critic->in_dim; j++) {
-            float acc = 0.0f;
-            for (int i = 0; i < link_critic->out_dim; i++) {
-                acc += delta[i] * link_critic->W[i][j];
-            }
-            // SOMMA CRUCIALE: Aggiungiamo il contributo del Critic a quello dell'Actor
-            trunk_grad_accum[j] += acc;
-        }
+    if (l == 0) {
+      // SIAMO ALL'USCITA: Scriviamo nel buffer di output per i linked layers
+      target_buf = accumulate_out;
+    } else {
+      // SIAMO DENTRO LA HEAD: Usiamo il buffer temporaneo
+      // memory optimization (tua logica originale)
+      if (ly->in_dim > delta_cap) {
+        free(delta_buf);
+        delta_buf = malloc(ly->in_dim * sizeof(float));
+        delta_cap = ly->in_dim;
+        if (!delta_buf)
+          return; // Gestione errore
+      }
+      target_buf = delta_buf;
     }
 
-    // ============================================================
-    // FASE 3: BACKPROP SUL TRONCO CONDIVISO (Loop all'indietro)
-    // ============================================================
+    // Se abbiamo un buffer valido dove scrivere (accumulate_out non deve essere
+    // NULL)
+    if (target_buf != NULL) {
+      prev = target_buf;
 
-    // Inizia la discesa dal layer 0 verso l'input dei sensori.
-    // Attualmente hai solo il layer 0, ma il ciclo lo rende robusto se ne aggiungi altri.
-    // Usiamo 'num_layers' inteso come layer del tronco (nel tuo caso, immagino sia 1).
-    // SE invece net->num_layers include anche i link (quindi è 3), il loop deve partire da 0.
-    // Assumo qui che tu voglia iterare solo sul tronco (indice 0).
+      float *restrict p_buf = prev;
+      for (int j = 0; j < in_dim; ++j) {
+        float acc = 0.0f;
 
-    float *next_layer_delta = trunk_grad_accum; // Questo è il delta che arriva dall'alto
-
-    // NOTA: Se hai più layer nel tronco, gestisci malloc/free per buffer intermedi come fatto in core_head
-    // Per ora assumiamo 1 solo layer (l=0), quindi niente buffer dinamici complessi.
-
-    for (int l = 0; l >= 0; l--) { // Loop fatto per 1 solo layer (0)
-        DenseLayer *ly = &net->layers[l];
-
-        // Input: Se l=0 è il sensore, altrimenti output layer precedente (l-1)
-        float *inp = (l == 0) ? sensor_input : net->layers[l-1].out;
-
-        // 1. Derivata Attivazione Layer Corrente (Trunk)
-        // Trasformiamo next_layer_delta (dL/da) in delta (dL/dz)
-        for (int i = 0; i < ly->out_dim; i++) {
-            float out_val = ly->out[i];
-            switch (ly->activation) {
-                case ACT_RELU:
-                    next_layer_delta[i] = (out_val > 0.0f) ? next_layer_delta[i] : 0.0f;
-                    break;
-                // ...
-                default: break;
-            }
+        // A. Calcolo parte lineare (Moltiplicazione matriciale Delta * W
+        // trasposta)
+        for (int i = 0; i < out_dim; ++i) {
+          acc += d[i] * ly->W[i][j];
         }
 
-        // 2. Aggiornamento Pesi
-        for (int i = 0; i < ly->out_dim; i++) {
-            ly->db[i] += next_layer_delta[i];
-            for (int j = 0; j < ly->in_dim; j++) {
-                ly->dW[i][j] += next_layer_delta[i] * inp[j];
-            }
-        }
-
-        // 3. Accumulo per layer precedenti (SOLO SE l > 0)
+        // B. Gestione Derivata Attivazione
         if (l > 0) {
-            // Qui dovresti calcolare il gradiente per il layer l-1 e metterlo in un buffer
-            // per il prossimo giro del loop.
-            // Dato che per ora hai solo l=0, questa parte non viene eseguita e risparmiamo calcoli.
-            // Se espandi il tronco, copia la logica di backward_core_head qui.
+          // Caso INTERNO: Dobbiamo derivare l'attivazione del layer precedente
+          // (l-1) che appartiene ancora a questa Head.
+          float h_prev = net->layers[l - 1].out[j];
+          switch (net->layers[l - 1].activation) {
+          case ACT_RELU:
+            acc = (h_prev > 0.f) ? acc : 0.f;
+            break;
+          case ACT_TANH:
+            acc = acc * (1.f - h_prev * h_prev);
+            break;
+          default:
+            break; // TODO ACT_NONE etc...
+          }
+        } else {
+          // Caso USCITA (l == 0): Stiamo uscendo verso lo Shared/Linked.
+          // NON applichiamo la derivata dell'attivazione qui.
+          // Passiamo il gradiente "lineare" puro. La derivata dell'attivazione
+          // che ha generato 'input' verrà fatta nella funzione dello shared.
         }
+
+        p_buf[j] = acc;
+      }
+      // Aggiorniamo delta per il prossimo giro (solo se non siamo alla fine)
+      delta = prev;
     }
+  }
 }
 
-void backward_actor_critic(SharedBackbone *net, float *sensor_input, float *output_actor_new, uint8_t out_dim, float *output_critic_new, float ret_norm,
-		uint8_t action_buf, float old_log_prob, float norm_adv, int current_batch_size){
+void backward_shared_backbone(SharedBackbone *net, float *grad_from_actor,
+                              float *grad_from_critic, float *sensor_input) {
 
-	//-----ACTOR LOSS-----
-	float log_prob_new = 0.f;
-	float batch_scale = 1.0f / (float)current_batch_size;
-	//evaluate log_prob_new of the selected action useful for the PPO ratio
-	float action_prob = output_actor_new[action_buf];
-	log_prob_new = logf(action_prob + 1e-8f); //Add epsilon 1e-8f to avoid log high values when the argument is near 0
-	//PPO ratio
-	float ratio = expf((log_prob_new - old_log_prob));
-	float surr1 = ratio * norm_adv;
-	float surr2 = clip(ratio, 1.0f - 0.2, 1.0f + 0.2);
-	surr2 = surr2 * norm_adv;
-	//float actor_loss_step = (surr1 < surr2) ? surr1 : surr2;
-	//actor_loss_step = -actor_loss_step; //minus because we have to maximize it
+  // --- MAPPING DEI LAYER ---
+  // Assumiamo la struttura che abbiamo concordato:
+  // layers[0]: Shared Trunk (Output usato da Link Actor e Link Critic)
+  // layers[1]: Link Actor (Input: Trunk Out -> Output: Actor Head In)
+  // layers[2]: Link Critic (Input: Trunk Out -> Output: Critic Head In)
 
-	//-----ENTROPY LOSS-----
-	float entropy_val = evaluate_entropy(output_actor_new, out_dim);
+  DenseLayer *trunk =
+      &net->layers[net->num_layers - 1]; // L'ultimo layer del Trunk
+  DenseLayer *link_actor =
+      &net->layers[net->num_layers]; // Subito dopo il Trunk
+  DenseLayer *link_critic =
+      &net->layers[net->num_layers + 1]; // Subito dopo il link Actor
 
-	//-----ACTOR GRADIENT-----
-	float d_logits_actor[out_dim];
-	for(int i = 0; i < out_dim; i++){
-		float p = output_actor_new[i];
-		float grad_ppo = 0.0f;
-		float grad_ent = 0.0f;
+  float trunk_grad_accum[trunk->out_dim];
+  memset(trunk_grad_accum, 0, trunk->out_dim * sizeof(float));
 
-		if(surr1 <= surr2){ //else the gradient is 0 because of the PPO safety clipping
-			if(i == action_buf){
-				//For the choosen action: -(1 - p) * A
-				grad_ppo = -(1.0f - p) * norm_adv * ratio;
-			}
-			else{
-				//For other actions: p * A
-				grad_ppo = p * norm_adv * ratio;
-			}
-		}
-		//-----ENTROPY GRADIENT-----
-		// Formula: coeff * p * (log(p) + H_total)
-		float log_p = logf(p + 1e-8f);
-		grad_ent = ENT_BETA * p * (log_p + entropy_val);
+  // ============================================================
+  // FASE 1: BACKPROP SU LINK ACTOR (Layer 1)
+  // ============================================================
+  {
+    float *delta =
+        grad_from_actor;       // Questo è dL/da (gradiente rispetto all'output)
+    float *input = trunk->out; // Input ricevuto nella forward pass
 
-		// --- C. Somma Finale ---
-		// Questo è il valore che passerai indietro al layer precedente
-		d_logits_actor[i] = (grad_ppo + grad_ent) * batch_scale;
-	}
+    for (int i = 0; i < link_actor->out_dim; i++) {
+      // A. Derivata dell'attivazione (dL/da -> dL/dz)
+      // Trasformiamo il gradiente "grezzo" in "delta" locale
+      float out_val =
+          link_actor
+              ->out[i]; // TODO: Verificare se l'attivazione serve pre o post
 
-	//-----CRITIC LOSS-----
-	//float critic_loss_step = powf((output_critic[0] - buf->advantage_buffer[t]), 2);
-	float d_logits_critic[1];
-	for(int i = 0; i < 1; i++) d_logits_critic[i] = (CRITIC_COEFF * 2.0f * (output_critic_new[0] - ret_norm)) * batch_scale;
+      switch (link_actor->activation) {
+      case ACT_RELU:
+        delta[i] = (out_val > 0.0f) ? delta[i] : 0.0f;
+        break;
+      case ACT_TANH:
+        delta[i] = delta[i] * (1.0f - out_val * out_val);
+        break;
+      case ACT_NONE:
+      default:
+        // delta rimane invariato
+        break;
+      }
 
-	//POSSO CHIAMARE UN'UNICA FUNZIONE PER ENTRAMBE DOVE DENTRO IN MODO SEPARATO CALCOLO LE DERIVATE E L'ACCUMULO
-	//POI SOMMO GLI ACCUMULI FINALI (ACTOR E CRITIC CON SHARED DEVONO AVERE STESSO LAYER INIZIALE) E LI PASSO ALLO SHARED PER LA PARTE FINALE
-	float grad_from_actor[net->actor.layers[0].in_dim];
-	float grad_from_critic[net->critic.layers[0].in_dim];
-	backward_core_head(&net->actor, d_logits_actor, net->layers[net->num_layers].out, grad_from_actor);
-	backward_core_head(&net->critic, d_logits_critic, net->layers[net->num_layers+1].out, grad_from_critic);
-	backward_shared_backbone(net, grad_from_actor, grad_from_critic, sensor_input);
-}
-
-
-
-uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count, uint8_t done){
-    if (step_count == 0) return 1;
-
-    // --- FASE 1: PRE-CALCOLO (Una volta sola per episodio/buffer) ---
-
-    // 1. Calcola i Returns (R) e li mette in advantage_buffer
-    evaluate_return(buf, step_count);
-
-    // 2. Evaluate Advantages that will be stored into critic buffer to save and reuse memory
-    evaluate_advantages(buf, step_count);
-
-    // --- FASE 2: TRAINING LOOP (PPO) ---
-
-    // Buffer temporanei per le uscite (allocati nello stack)
-    uint8_t out_dim_actor = net->actor.layers[net->actor.num_layers-1].out_dim;
-    float output_actor[out_dim_actor];
-
-    uint8_t out_dim_critic = net->critic.layers[net->critic.num_layers-1].out_dim;
-    float output_critic[out_dim_critic];
-
-    // --- NUOVA LOGICA: Impostazioni Mini-Batch ---
-
-    // Alloca l'array degli indici (usiamo un VLA - Variable Length Array)
-    int *indices = malloc(step_count * sizeof(int));
-	if(indices == NULL) return 0; // Protezione sicurezza
-
-	for (int i = 0; i < step_count; i++) {
-		indices[i] = i;
-	}
-
-    for(int epoch = 0; epoch < N_EPOCHS; epoch++){
-
-        // SHUFFLE: Mischia gli indici all'inizio di ogni epoca (Fisher-Yates)
-        for (int i = step_count - 1; i > 0; i--) {
-            int j = rand() % (i + 1);
-            int temp = indices[i];
-            indices[i] = indices[j];
-            indices[j] = temp;
-        }
-
-        // LOOP DEI MINI-BATCH
-        for(int start = 0; start < step_count; start += BATCH_SIZE){
-
-            int end = start + BATCH_SIZE;
-            if (end > step_count) end = step_count;
-
-            int current_batch_size = end - start;
-
-            // ---> SPOSTATO: Reset dei gradienti per il mini-batch corrente
-            zero_grad(net);
-
-            // LOOP SUI SINGOLI CAMPIONI DEL MINI-BATCH
-            for(int b = start; b < end; b++){
-
-                // Prendi l'indice randomizzato
-                int t = indices[b];
-
-                // Recupera lo stato grezzo dal buffer usando l'indice 't'
-                float *state = buf->state_buffer[t];
-
-                // Forward Pass: Calcola probabilità e valori correnti
-                forward(net, state, output_actor, output_critic);
-
-                // Recupera i dati pre-calcolati
-                float normalized_advantage = buf->critic_buffer[t];     // A_norm (per Actor)
-                float return_target = buf->advantage_buffer[t];         // R (per Critic)
-                float old_log_prob = buf->log_prob_old_buffer[t];
-                uint8_t action = (uint8_t)buf->action_buffer[t];
-
-                // Backward Pass
-                backward_actor_critic(
-                    net,
-                    state,              // Input Sensori
-                    output_actor,       // output_actor_new
-                    out_dim_actor,      // out_dim
-                    output_critic,      // output_critic_new
-                    return_target,      // ret_norm (Target del Critic)
-                    action,             // action_buf
-                    old_log_prob,       // old_log_prob
-                    normalized_advantage, // norm_adv (Advantage per Actor)
-                    current_batch_size  // <--- NUOVO PARAMETRO PER LA SCALA
-                );
-            }
-
-            // ---> SPOSTATO: Applica le modifiche ai pesi per QUESTO mini-batch
-            adam_optimizer(net);
-        }
+      // B. Aggiornamento Pesi (dW) e Bias (db)
+      link_actor->db[i] += delta[i];
+      float *restrict dw_row = link_actor->dW[i];
+      float di = delta[i];
+      for (int j = 0; j < link_actor->in_dim; j++) {
+        dw_row[j] += di * input[j];
+      }
     }
 
-	free(indices);
+    // C. Calcolo Accumulo verso il Tronco (W^T * delta)
+    const int act_in_dim = link_actor->in_dim;
+    const int act_out_dim = link_actor->out_dim;
+    for (int j = 0; j < act_in_dim; j++) {
+      float acc = 0.0f;
+      for (int i = 0; i < act_out_dim; i++) {
+        acc += delta[i] * link_actor->W[i][j];
+      }
+      // Scriviamo nel buffer comune (PRIMA SCRITTURA o +=, qui è 0 all'inizio
+      // quindi += va bene)
+      trunk_grad_accum[j] += acc;
+    }
+  }
+
+  // ============================================================
+  // FASE 2: BACKPROP SU LINK CRITIC (Layer 2)
+  // ============================================================
+  {
+    float *delta = grad_from_critic;
+    float *input = trunk->out;
+
+    for (int i = 0; i < link_critic->out_dim; i++) {
+      // A. Derivata Attivazione
+      float out_val = link_critic->out[i];
+
+      switch (link_critic->activation) {
+      case ACT_RELU:
+        delta[i] = (out_val > 0.0f) ? delta[i] : 0.0f;
+        break;
+      case ACT_TANH:
+        delta[i] = delta[i] * (1.0f - out_val * out_val);
+        break;
+      // ... altri casi ...
+      default:
+        break;
+      }
+
+      // B. Aggiornamento Pesi
+      link_critic->db[i] += delta[i];
+      float *restrict dw_row = link_critic->dW[i];
+      float di = delta[i];
+      for (int j = 0; j < link_critic->in_dim; j++) {
+        dw_row[j] += di * input[j];
+      }
+    }
+
+    // C. Calcolo Accumulo verso il Tronco (SOMMA)
+    const int crit_in_dim = link_critic->in_dim;
+    const int crit_out_dim = link_critic->out_dim;
+    for (int j = 0; j < crit_in_dim; j++) {
+      float acc = 0.0f;
+      for (int i = 0; i < crit_out_dim; i++) {
+        acc += delta[i] * link_critic->W[i][j];
+      }
+      // SOMMA CRUCIALE: Aggiungiamo il contributo del Critic a quello
+      // dell'Actor
+      trunk_grad_accum[j] += acc;
+    }
+  }
+
+  // ============================================================
+  // FASE 3: BACKPROP SUL TRONCO CONDIVISO (Loop all'indietro)
+  // ============================================================
+
+  // Inizia la discesa dal layer 0 verso l'input dei sensori.
+  // Usiamo 'num_layers' inteso come layer del tronco.
+
+  float *next_layer_delta =
+      trunk_grad_accum;    // Questo è il delta che arriva dall'alto
+  float *delta_buf = NULL; // Buffer dinamico temporaneo per prop.
+  uint32_t delta_cap = 0;
+
+  for (int l = net->num_layers - 1; l >= 0; l--) {
+    DenseLayer *ly = &net->layers[l];
+
+    // Input: Se l=0 è il sensore, altrimenti output layer precedente (l-1)
+    float *inp = (l == 0) ? sensor_input : net->layers[l - 1].out;
+
+    // 1. Derivata Attivazione Layer Corrente (Trunk)
+    // Trasformiamo next_layer_delta (dL/da) in delta (dL/dz)
+    for (int i = 0; i < ly->out_dim; i++) {
+      float out_val = ly->out[i];
+      switch (ly->activation) {
+      case ACT_RELU:
+        next_layer_delta[i] = (out_val > 0.0f) ? next_layer_delta[i] : 0.0f;
+        break;
+      case ACT_TANH:
+        next_layer_delta[i] = next_layer_delta[i] * (1.0f - out_val * out_val);
+        break;
+      // ...
+      default:
+        break;
+      }
+    }
+
+    // 2. Aggiornamento Pesi e Bias
+    for (int i = 0; i < ly->out_dim; i++) {
+      ly->db[i] += next_layer_delta[i];
+      for (int j = 0; j < ly->in_dim; j++) {
+        ly->dW[i][j] += next_layer_delta[i] * inp[j];
+      }
+    }
+
+    // 3. Accumulo per layer precedenti
+    if (l > 0) {
+      // Allocate memory optimization
+      if (ly->in_dim > delta_cap) {
+        free(delta_buf);
+        delta_buf = malloc(ly->in_dim * sizeof(float));
+        delta_cap = ly->in_dim;
+        if (!delta_buf)
+          return; // Error handling
+      }
+
+      float *prev = delta_buf;
+
+      for (int j = 0; j < ly->in_dim; ++j) {
+        float acc = 0.0f;
+        // Accumulo gradiente (Delta * W trasposta)
+        for (int i = 0; i < ly->out_dim; ++i) {
+          acc += next_layer_delta[i] * ly->W[i][j];
+        }
+        prev[j] = acc;
+      }
+
+      // Il delta calcolato ora diventerà il next_layer_delta per l-1
+      // Dobbiamo re-indirizzare o copiare (copia per sicurezza dei puntatori)
+      // Selezioniamo il delta_buf come puntatore per il prossimo giro
+      next_layer_delta = prev;
+    }
+  }
+
+  if (delta_buf)
+    free(delta_buf);
+}
+
+void backward_actor_critic(SharedBackbone *net, float *sensor_input,
+                           float *output_actor_new, uint8_t out_dim,
+                           float *output_critic_new, float ret_norm,
+                           action_t action_buf, float old_log_prob,
+                           float norm_adv, int current_batch_size,
+                           float old_sigma) {
+
+  float batch_scale = 1.0f / (float)current_batch_size;
+  float log_prob_new;
+  float d_logits_actor[out_dim];
+
+#if USE_CONTINUOUS_ACTIONS
+  // --- CASO CONTINUO ---
+  // Usa old_sigma: il sigma che era attivo al momento della RACCOLTA del
+  // rollout, calcolato una volta sola in finish_episode() prima di qualsiasi
+  // adam_t++. Questo garantisce che log_prob_old e log_prob_new usino la stessa
+  // distribuzione di riferimento, rendendo il ratio PPO matematicamente valido.
+  float mu = output_actor_new[0];
+  log_prob_new = gaussian_log_prob(action_buf, mu, old_sigma);
+
+  // Clamp log-ratio BEFORE expf() to prevent inf/nan when policies diverge.
+  // Without this, expf(very_large_number) = INF -> grad_ppo = INF -> mu
+  // saturates to ±1.
+  // clamp to [-4, 4]
+  float log_ratio = log_prob_new - old_log_prob;
+  log_ratio = clip(log_ratio, -4.0f,
+                   4.0f); // exp(±4) keeps ratio in safe range [0.018, 54]
+  float ratio = expf(log_ratio);
+
+  // Calcolo del PPO Clip Surrogate Gradient Corretto
+  // Se la policy si sposta troppo (fuori dal trust region 1-eps .. 1+eps)
+  // il gradiente DEVE essere matematicamente 0.0f, bloccando l'ottimizzatore
+  // Adam.
+  float grad_ppo = 0.0f;
+  float d_log_prob = (action_buf - mu) / (old_sigma * old_sigma);
+
+  if (norm_adv > 0.0f) {
+    if (ratio < 1.0f + EPS_CLIPPING) {
+      grad_ppo = -(ratio * norm_adv * d_log_prob);
+    } // altrimenti grad_ppo resta 0.0 (Capped)
+  } else {
+    if (ratio > 1.0f - EPS_CLIPPING) {
+      grad_ppo = -(ratio * norm_adv * d_log_prob);
+    } // altrimenti grad_ppo resta 0.0 (Capped)
+  }
+
+  // Penalità L2 su mu: con sigma fisso, l'entropia gaussiana H =
+  // 0.5*log(2πe*σ²) non dipende da mu (∂H/∂mu = 0). Al suo posto usiamo una
+  // penalità L2 che spinge mu verso 0, prevenendo la saturazione del tanh
+  // verso ±1. ENT_BETA = 0.0 disabilita questo termine.
+  float grad_ent = ENT_BETA * mu;
+
+  float d_mu = (grad_ppo + grad_ent) * batch_scale;
+
+  // FIX CRITICO: Derivata dell'attivazione TANH dell'ultimo layer dell'Actor!
+  // La funzione backward_core_head tratta dout_last come dL/dz (derivata
+  // pre-attivazione). Quindi dobbiamo moltiplicare qui il nostro dL/dmu per
+  // (1 - mu^2). Se non lo facessimo, Tanh non saturerebbe i gradienti e i
+  // pesi esploderebbero a -inf o +inf, bloccando l'agente fisso a un'azione
+  // estrema (-2.0 o +2.0).
+  float tanh_deriv = 1.0f - mu * mu;
+
+  // Floor di sicurezza contro lo Strict Vanishing Gradient:
+  // Se mu è già accidentalmente a 1.0/-1.0, tanh_deriv sarebbe 0.0 e la rete
+  // non si sbloccherebbe MAI. Assicuriamo una deviazione minima per
+  // permettere all'adam di recuperare.
+  if (tanh_deriv < 0.05f) {
+    tanh_deriv = 0.05f;
+  }
+
+  d_logits_actor[0] = d_mu * tanh_deriv;
+#else
+  // --- CASO DISCRETO ---
+  float action_prob = output_actor_new[(uint8_t)action_buf];
+  log_prob_new = logf(action_prob + 1e-8f);
+  float ratio = expf((log_prob_new - old_log_prob));
+  float surr1 = ratio * norm_adv;
+  float surr2 = clip(ratio, 1.0f - 0.2f, 1.0f + 0.2f) * norm_adv;
+
+  float entropy_val = evaluate_entropy(output_actor_new, out_dim);
+
+  for (int i = 0; i < out_dim; i++) {
+    float p = output_actor_new[i];
+    float grad_ppo = 0.0f;
+    float grad_ent = 0.0f;
+
+    if (surr1 <= surr2) {
+      if (i == (uint8_t)action_buf)
+        grad_ppo = -(1.0f - p) * norm_adv * ratio;
+      else
+        grad_ppo = p * norm_adv * ratio;
+    }
+    float log_p = logf(p + 1e-8f);
+    grad_ent = ENT_BETA * p * (log_p + entropy_val);
+    d_logits_actor[i] = (grad_ppo + grad_ent) * batch_scale;
+  }
+#endif
+
+  //-----CRITIC LOSS E BACKPROP -----
+  // Added Value Clipping to avoid Gradient Interference when computing loss
+  // on shared backbones V(s) current evaluation
+  float v_curr = output_critic_new[0];
+
+  // Temporal Difference error: v_curr - R_target
+  // P4 FIX: rimosso il clip ±1 su v_err. Il critic deve imparare return
+  // nel range [-16, 0] per il Pendulum; clippare a ±1 rallenta enormemente
+  // l'apprendimento della scala. Il global gradient_norm_l2 (clip 0.5)
+  // protegge già da gradienti esplosivi a livello di rete intera.
+  float v_err = v_curr - ret_norm;
+
+  float d_logits_critic[1];
+  d_logits_critic[0] = (CRITIC_COEFF * v_err) * batch_scale;
+
+  float grad_from_actor[net->actor.layers[0].in_dim];
+  float grad_from_critic[net->critic.layers[0].in_dim];
+  backward_core_head(&net->actor, d_logits_actor,
+                     net->layers[net->num_layers].out, grad_from_actor);
+  backward_core_head(&net->critic, d_logits_critic,
+                     net->layers[net->num_layers + 1].out, grad_from_critic);
+  backward_shared_backbone(net, grad_from_actor, grad_from_critic,
+                           sensor_input);
+}
+
+uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count,
+                        uint8_t done) {
+  if (step_count == 0)
     return 1;
+
+  // --- FASE 1: PRE-CALCOLO (Una volta sola per episodio/buffer) ---
+
+  // FIX: Calcola sigma_at_collection PRIMA di qualsiasi adam_t++ per
+  // garantire che tutti i mini-batch usino lo stesso sigma con cui è stato
+  // raccolto il rollout. Questo rende il ratio PPO = exp(log_new - log_old)
+  // matematicamente valido (stessa distribuzione di riferimento per entrambi
+  // i termini).
+#if USE_CONTINUOUS_ACTIONS
+  // sigma_at_collection is now stored per-sample in sigma_buffer during
+  // collection in step(). No need to recompute it here from adam_t.
+  // This prevents mismatch when other episodes ran training between
+  // collection and this call, which would have incremented adam_t and changed
+  // the sigma.
+  (void)0; // placeholder to keep preprocessor block valid
+#else
+  (void)0;
+#endif
+
+  // Calculate GAE Advantages (saved to critic_buffer) and Returns (saved to
+  // advantage_buffer)
+  evaluate_advantages_and_returns(buf, step_count);
+
+  // --- FASE 2: TRAINING LOOP (PPO) ---
+
+  // Buffer temporanei per le uscite (allocati nello stack)
+  uint8_t out_dim_actor = net->actor.layers[net->actor.num_layers - 1].out_dim;
+  float output_actor[out_dim_actor];
+
+  uint8_t out_dim_critic =
+      net->critic.layers[net->critic.num_layers - 1].out_dim;
+  float output_critic[out_dim_critic];
+
+  // --- NUOVA LOGICA: Impostazioni Mini-Batch ---
+
+  // Inizializza l'array degli indici preallocato nel Buffer
+  for (int i = 0; i < step_count; i++) {
+    buf->indices[i] = i;
+  }
+
+  for (int epoch = 0; epoch < N_EPOCHS; epoch++) {
+
+    // SHUFFLE: Mischia gli indici all'inizio di ogni epoca (Fisher-Yates)
+    for (int i = step_count - 1; i > 0; i--) {
+      int j = rand() % (i + 1);
+      uint16_t temp = buf->indices[i];
+      buf->indices[i] = buf->indices[j];
+      buf->indices[j] = temp;
+    }
+
+    // LOOP DEI MINI-BATCH
+    for (int start = 0; start < step_count; start += BATCH_SIZE) {
+
+      int end = start + BATCH_SIZE;
+      if (end > step_count)
+        end = step_count;
+
+      int current_batch_size = end - start;
+
+      // ---> SPOSTATO: Reset dei gradienti per il mini-batch corrente
+      zero_grad(net);
+
+      // LOOP SUI SINGOLI CAMPIONI DEL MINI-BATCH
+      for (int b = start; b < end; b++) {
+
+        // Prendi l'indice randomizzato
+        int t = buf->indices[b];
+
+        // Recupera lo stato grezzo dal buffer usando l'indice 't'
+        float *state = buf->state_buffer[t];
+
+        // Forward Pass: Calcola probabilità e valori correnti
+        forward(net, state, output_actor, output_critic);
+
+        // Recupera i dati pre-calcolati
+        float normalized_advantage =
+            buf->critic_buffer[t];                      // A_norm (per Actor)
+        float return_target = buf->advantage_buffer[t]; // R (per Critic)
+        float old_log_prob = buf->log_prob_old_buffer[t];
+        action_t action = buf->action_buffer[t];
+#if USE_CONTINUOUS_ACTIONS
+        // Per-sample sigma: il sigma esatto usato per campionare questa
+        // azione. È più preciso di sigma_at_collection (che usava adam_t
+        // attuale).
+        float sample_sigma = buf->sigma_buffer[t];
+#else
+        float sample_sigma = 0.0f;
+#endif
+
+        // Backward Pass
+        backward_actor_critic(
+            net,
+            state,                // Input Sensori
+            output_actor,         // output_actor_new
+            out_dim_actor,        // out_dim
+            output_critic,        // output_critic_new
+            return_target,        // ret_norm (Target del Critic)
+            action,               // action_buf
+            old_log_prob,         // old_log_prob
+            normalized_advantage, // norm_adv (Advantage per Actor)
+            current_batch_size,   // scala per mini-batch
+            sample_sigma          // sigma esatto al momento della raccolta
+        );
+      }
+
+      // normalize gradient and optimize
+      gradient_norm_l2(net);
+      adam_optimizer(net);
+    }
+  }
+
+  return 1;
 }
-
-/*uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count){
-	if (step_count == 0) return 1; //no step in the buffer
-	//zero grad
-	zero_grad(net);
-	float *adv_buf = buf->advantage_buffer;
-	//returns & baseline
-	float G = 0.0f;
-	for (int t = step_count - 1; t >= 0; --t) {
-		float r = adv_buf[t]; //TODO
-		G = r + 0.99f * G;
-		adv_buf[t] = G;
-	}
-	//adv normalization
-	float mean = 0.0f;
-	for (int t = 0; t < step_count; t++) mean += adv_buf[t];
-	mean /= step_count;
-	for (int t = 0; t < step_count; t++) adv_buf[t] -= mean;
-
-	float var = 0.0f;
-	for (int t = 0; t < step_count; t++) var += adv_buf[t] * adv_buf[t];
-	float std = sqrtf(var / step_count) + 1e-6f;
-	for (int t = 0; t < step_count; t++) adv_buf[t] /= std;
-
-
-	//Re-Forward
-	for(int t = 0; t < step_count; t++){
-		float *state = buf->state_buffer[t];
-		float r = buf->advantage_buffer[t]; //TODO
-
-		forward(net, state, NULL, NULL);
-
-		float adv = adv_buf[t];
-		uint32_t a = buf->action_buffer[t];
-
-
-		backward_pg(net, state, a, adv, r, step_count);
-
-	}
-
-	//Normalize gradient
-	//gradient_norm_l2(net);
-
-
-	adam_optimizer(net);
-
-
-	return 0;
-} */
 
 /*CODE FOR MOUNTAIN CAR
 uint8_t done_check(float *state, uint32_t step){
-	if (state[0] >= 0.5) return 1; //goal reached
-	if (step >= 200) return 1; //timeout
-	return 0;
+        if (state[0] >= 0.5) return 1; //goal reached
+        if (step >= 200) return 1; //timeout
+        return 0;
 }
 
 float prev_pos = 0.f;
 float evaluate_reward(float *obs){
-	float r = 0.f;
-	r-=1.0;
-	if(obs[0]>prev_pos) r+=2.0;
-	return r;
+        float r = 0.f;
+        r-=1.0;
+        if(obs[0]>prev_pos) r+=2.0;
+        return r;
 }
 */
 
-/*CODE FOR CARTPOLE*/
+/*CODE FOR CARTPOLE
 uint8_t done_check(float *state, uint32_t step){
-	if (fabsf(state[0]) > CART_LIMIT) return 2;      //out of bound
-	if (fabsf(state[2]) > POLE_LIMIT) return 2;      //±12°
-	if (step >= MAX_STEPS){
-		return 1;   //timeout
-	}
-	return 0;
+        if (fabsf(state[0]) > CART_LIMIT) return 2;      //out of bound
+        if (fabsf(state[2]) > POLE_LIMIT) return 2;      //±12°
+        if (step >= MAX_STEPS){
+                return 1;   //timeout
+        }
+        return 0;
 }
 
 float evaluate_reward(float *state){
-	return 1.f;
+        return 1.f;
+}*/
+
+/*CODE FOR PENDULUM*/
+uint8_t done_check(float *state, uint32_t step) {
+  // Il documento conferma che non ci sono condizioni di "out of bounds".
+  // Si tronca solo al raggiungimento dei 200 step.
+  if (step >= ROLLOUT) {
+    return 1; // Timeout
+  }
+  return 0;
 }
 
+// --- Funzione di Reward ---
+// --- Funzione di Reward ---
+float evaluate_reward(float *state, action_t prev_action_raw) {
+  float theta = atan2f(state[1], state[0]);
+
+  // 1. RIPRISTINA LA SCALA FISICA (In Python avevamo diviso per 8 per mappare
+  // in [-1,1]) NOTA: Questo conferma che la Rete Neurale (lo Shared Trunk)
+  // riceve state[2] GIA' confinato nell'intervallo ideale [-1, 1], rendendo
+  // l'input perfettamente omogeneo a Cos e Sin!
+  float theta_dt = state[2] * 8.0f;
+
+  // 2. RIPRISTINA LA COPPIA FISICA (Da -1..1 astratto a -2..2 fisico)
+  float torque = prev_action_raw * 2.0f;
+
+  // ---> MODIFICA: Clipping per allinearsi all'azione reale eseguita via UART
+  if (torque > 2.0f)
+    torque = 2.0f;
+  if (torque < -2.0f)
+    torque = -2.0f;
+
+  // 3. Formula Esatta
+  float cost = (theta * theta) + 0.1f * (theta_dt * theta_dt) +
+               0.001f * (torque * torque);
+
+  // 4. SCALA IL REWARD
+  return -cost / 10.0f;
+}
 
 /*CODE FOR ACROBOT
 uint8_t done_check(float *state, uint32_t step){
-	uint16_t a1 = 20;
-	uint16_t a2 = 10;
-	uint32_t goal1 = 0;
-	uint32_t goal2 = 180;
-	float cos1 = state[0];
-	float sin1 = state[1];
-	float cos2 = state[2];
-	float sin2 = state[3];
-	float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
-	float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
-	uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
-	uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
-	if((angle2_reached) || step>=500) return 1;
-	else return 0;
+        uint16_t a1 = 20;
+        uint16_t a2 = 10;
+        uint32_t goal1 = 0;
+        uint32_t goal2 = 180;
+        float cos1 = state[0];
+        float sin1 = state[1];
+        float cos2 = state[2];
+        float sin2 = state[3];
+        float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
+        float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
+        uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
+        uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
+        if((angle2_reached) || step>=500) return 1;
+        else return 0;
 }
 
 
 float evaluate_reward(float *state, uint32_t step){
-	int reward = -1;
-	uint16_t a1 = 20;
-	uint16_t a2 = 10;
-	uint32_t goal1 = 0;
-	uint32_t goal2 = 180;
-	float cos1 = state[0];
-	float sin1 = state[1];
-	float cos2 = state[2];
-	float sin2 = state[3];
-	float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
-	float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
-	uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
-	uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
-	if((angle2_reached) && (angle1_reached)) reward = reward + 100;
-	return reward;
+        int reward = -1;
+        uint16_t a1 = 20;
+        uint16_t a2 = 10;
+        uint32_t goal1 = 0;
+        uint32_t goal2 = 180;
+        float cos1 = state[0];
+        float sin1 = state[1];
+        float cos2 = state[2];
+        float sin2 = state[3];
+        float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
+        float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
+        uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
+        uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
+        if((angle2_reached) && (angle1_reached)) reward = reward + 100;
+        return reward;
 }
 */
-
