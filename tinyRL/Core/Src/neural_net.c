@@ -52,12 +52,23 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor,
     return 0;
   init_layer_params(&net->layers[num_layers + 1]);
 
-  // ACTOR/CRITIC INIT
   for (int i = 0; i < actor->num_layers; i++) {
     if (!dense_init(&actor->layers[i], net_topology_actor[i],
                     net_topology_actor[i + 1], activations_actor[i]))
       return 0;
     init_layer_params(&actor->layers[i]);
+
+    // PPO CONTINUOUS FIX - Final Layer Initialization Scaling
+    // Standard practice is to scale the final policy weights by 0.01
+    // to start training with actions perfectly centered at ~0.0 (mu=0).
+    // Otherwise, Glorot limit pushes Tanh to +/- 1.0 immediately!
+    if (i == actor->num_layers - 1) {
+      for (int r = 0; r < actor->layers[i].out_dim; r++) {
+        for (int c = 0; c < actor->layers[i].in_dim; c++) {
+          actor->layers[i].W[r][c] *= 0.01f;
+        }
+      }
+    }
   }
 
   for (int i = 0; i < critic->num_layers; i++) {

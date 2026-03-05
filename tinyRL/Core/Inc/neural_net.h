@@ -4,18 +4,17 @@
 #include <math.h>
 #include <stdint.h>
 
-#define LR 0.0005f // 0.003 good for CartPole
+#define LR 0.0005f // 0.0005f
 #define BETA1 0.9f
 #define BETA2 0.999f
 #define EPS_ADAM 1e-8f
 #define GAMMA 0.99f
-#define ENT_BETA                                                               \
-  0.005f // L2 penalty on mu to prevent tanh saturation (exploration)
+#define ENT_BETA 0.0f // L2 penalty on mu to prevent tanh saturation (exploration)
 #define STARTING_ACTION_SIGMA 0.8f // Initial std dev for continuous actions
 #define CRIT_LOSS 0.5
-#define MAX_EPISODE 2000
-#define MAX_STEPS 2048
-#define BATCH_SIZE 64
+#define MAX_EPISODE 400
+#define MAX_STEPS 2000
+#define BATCH_SIZE 64 // 64
 #define ROLLOUT 200
 
 #define N_EPOCHS 10
@@ -24,12 +23,11 @@
 // denominator for sigma decay is: episodes × (buffer / batch) × epochs.
 #define TOTAL_ADAM_STEPS (MAX_EPISODE * (MAX_STEPS / BATCH_SIZE) * N_EPOCHS)
 #define EPS_CLIPPING 0.2f
-#define CRITIC_COEFF 0.5F
+#define CRITIC_COEFF 2.0F
 // #define ENTROPY_W 0.001 //0.001 good for CartPole
 #define PPO_EPSILON 0.2 // 0.2
 
-#define USE_CONTINUOUS_ACTIONS                                                 \
-  1 // 1=Continuo (es. Pendulum), 0=Discreto (es. CartPole)
+#define USE_CONTINUOUS_ACTIONS 1 // 1=Continuo (es. Pendulum), 0=Discreto (es. CartPole)
 
 #if USE_CONTINUOUS_ACTIONS
 typedef float action_t;

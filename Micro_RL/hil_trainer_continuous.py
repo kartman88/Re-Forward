@@ -167,6 +167,7 @@ def main():
                 
                 # Step nell'ambiente fisico
                 obs, r, terminated, truncated, _ = env.step(action_to_env)
+                #print("REWARD:", r)  # Debug: stampa il reward ricevuto
                 #Divido per 8 l'obs[2] per normalizzare
                 #obs[2] /= 8
                 

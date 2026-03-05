@@ -168,9 +168,12 @@ int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
   if (!new_episode && *step_count > 0) {
     uint32_t prev_t = *step_count - 1;
 
-    // 1. Assegna il Reward dell'azione a_{t-1} valutata in s_t
+    // 1. Assegna il Reward dell'azione a_{t-1} valutata nello stato s_{t-1}
+    // anziché s_t (Riscatta il delay temporale con Gymnasium, che calcola il
+    // cost PRIMA dell'update fisico)
     action_t prev_a = buffer->action_buffer[prev_t];
-    *reward = evaluate_reward(obs, prev_a);
+    float *prev_step_obs = buffer->state_buffer[prev_t];
+    *reward = evaluate_reward(prev_step_obs, prev_a);
     buffer->advantage_buffer[prev_t] = *reward;
 
     // 2. Controllo Terminazione (avvenuta in s_t a causa di a_t-1)
@@ -251,18 +254,29 @@ int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
   float mu = output_actor[0];
   float a_raw = sample_continuous_action(mu, current_sigma);
 
-  // HARD ACTION BOUNDING (Approccio 1):
-  // L'azione esplorativa viene subito clippata rigidamente ai bordi fisici.
+  // SOFT GAUSSIAN CLIPPING (Fix for Gradient Explosion & Bias):
+  // Limit a_raw mathematically to mu +/- 3*sigma.
+  // This preserves the valid Gaussian PDF shape for 99.7% of samples,
+  // while actively blocking the 0.3% of extreme numerical outliers (a_raw
+  // = 4.0) that cause massive destructive gradient explosions ((a_raw -
+  // mu)/sigma^2).
+  float bound = 3.0f * current_sigma;
+  if (a_raw > mu + bound)
+    a_raw = mu + bound;
+  if (a_raw < mu - bound)
+    a_raw = mu - bound;
+
+  // L'azione fisica mandata ai motori è SEMPRE rigidamente tagliata a [-1, 1]
   a = fmaxf(fminf(a_raw, 1.0f), -1.0f);
   *action = a;
 
   // IMPORTANTE: Calcoliamo la log_prob e riempiamo il buffer usando l'azione
-  // LIMITATA `a`, non quella grezza. L'Actor deve capire e venire
-  // punito/premiato sulla base dell'azione che si è materializzata davvero
-  // nell'ambiente fisico.
-  log_prob = gaussian_log_prob(a, mu, current_sigma);
+  // a_raw "Soft Clipped". Questo garantisce la validità matematica della PDF
+  // evitando che la policy venga "assorbita" e bloccata in modo irreversibile
+  // ai bordi +/- 2.0 (Action Saturation).
+  log_prob = gaussian_log_prob(a_raw, mu, current_sigma);
 
-  buffer->action_buffer[*step_count] = a;
+  buffer->action_buffer[*step_count] = a_raw;
   buffer->sigma_buffer[*step_count] = current_sigma;
 #else
   a = (action_t)sample_action(output_actor, out_dim_actor);
@@ -715,6 +729,13 @@ void backward_actor_critic(SharedBackbone *net, float *sensor_input,
   float grad_ppo = 0.0f;
   float d_log_prob = (action_buf - mu) / (old_sigma * old_sigma);
 
+  // STABILITY FIX: Hard limit the analytical gradient of the log_prob.
+  // When an outlier action is sampled (e.g. a - mu = 3.0) and sigma is small
+  // (e.g. 0.2), d_log_prob blows up to 75.0! Multiplied by an Advantage, this
+  // instantly destroys the Actor weights and permanently saturates Tanh to
+  // +/- 1.0. Standard PPO frameworks safely clamp this derivative.
+  d_log_prob = clip(d_log_prob, -5.0f, 5.0f);
+
   if (norm_adv > 0.0f) {
     if (ratio < 1.0f + EPS_CLIPPING) {
       grad_ppo = -(ratio * norm_adv * d_log_prob);
@@ -985,7 +1006,7 @@ float evaluate_reward(float *state, action_t prev_action_raw) {
                0.001f * (torque * torque);
 
   // 4. SCALA IL REWARD
-  return -cost / 10.0f;
+  return -cost / 10.0f; //-cost / 10.0f
 }
 
 /*CODE FOR ACROBOT

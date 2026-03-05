@@ -11,7 +11,8 @@
 
 typedef struct {
   float **state_buffer;
-  uint32_t *action_buffer;
+  action_t *action_buffer; // FIX: DEVE essere action_t* (ovvero float* in
+                           // continuo), NON uint32_t*!
   uint8_t *done_buffer;
   float *log_prob_old_buffer;
   float *advantage_buffer;

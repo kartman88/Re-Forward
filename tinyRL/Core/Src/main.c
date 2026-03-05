@@ -112,7 +112,7 @@ int main(void) {
 #if USE_CONTINUOUS_ACTIONS
   int output_size = 1; // L'Actor genera solo la Media (Mu)
   ActivationType activations_actor_layers[] = {
-      ACT_RELU, ACT_TANH}; // Bound action space inside [-1, 1] range!
+      ACT_TANH}; // Bound action space inside [-1, 1] range!
 #else
   int output_size = 2; // N azioni discrete
   ActivationType activations_actor_layers[] = {ACT_RELU, ACT_SOFTMAX};
@@ -120,14 +120,15 @@ int main(void) {
 
   // create neural network
   SharedBackbone net;
-  int num_layers = 2;        // Trunk: Input -> 64
-  int num_layers_actor = 3;  // Actor: 64 -> 32 -> 16 -> 1
-  int num_layers_critic = 3; // Critic: 64 -> 32 -> 16 -> 1
-  int net_topology[] = {input_size, 64};
-  int net_topology_actor[] = {32, 16, output_size};
-  int net_topology_critic[] = {32, 16, 1};
+  int num_layers = 2;        // Trunk: Input -> 32
+  int num_layers_actor = 2;  // Actor Link + Out: 32 -> 16 -> 1
+  int num_layers_critic = 2; // Critic Link + Out: 32 -> 16 -> 1
+  int net_topology[] = {input_size, 32};
+  int net_topology_actor[] = {16, output_size};
+  int net_topology_critic[] = {16, 1};
   ActivationType activations[] = {ACT_RELU, ACT_RELU}; // Per i Trunk Layers
-  ActivationType activations_critic_layers[] = {ACT_RELU, ACT_NONE}; // Layer interni Critic
+  ActivationType activations_critic_layers[] = {
+      ACT_NONE}; // Layer interni Critic
 
   int is_ok = init_network(&net, num_layers, num_layers_actor,
                            num_layers_critic, net_topology, net_topology_actor,
@@ -152,7 +153,6 @@ int main(void) {
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
   else
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-  uint8_t success_count = 0;
 
   while (1) {
     if (uart_recv_floats(&huart3, obs, net_topology[0], 50)) {
