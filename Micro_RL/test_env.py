@@ -2,7 +2,7 @@
 import gymnasium as gym
 import numpy as np
 
-ENV_NAME          = "Acrobot-v1"
+ENV_NAME          = "Ant-v5"
 NUM_EPISODES      = 5            # quante prove vuoi fare
 MAX_STEPS         = 1000         # safety-cap per episodio
 

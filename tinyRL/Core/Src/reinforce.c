@@ -11,7 +11,8 @@
 
 static inline float frand(void) { return (float)rand() / RAND_MAX; }
 
-int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim) {
+int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim,
+                uint32_t action_dim) {
   /* azzera i campi così, in caso di errore, i free sono sicuri */
   buf->state_buffer = NULL;
   buf->action_buffer = NULL;
@@ -19,11 +20,16 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim) {
   buf->advantage_buffer = NULL;
   buf->critic_buffer = NULL;
   buf->sigma_buffer = NULL;
+  buf->action_dim = action_dim;
   n_steps++; // to prevent limit errors
 
   /* ---------- malloc principali ----------------------------- */
   buf->state_buffer = malloc(n_steps * sizeof(float *));
+#if USE_CONTINUOUS_ACTIONS
+  buf->action_buffer = malloc(n_steps * sizeof(action_t *));
+#else
   buf->action_buffer = malloc(n_steps * sizeof(action_t));
+#endif
   buf->log_prob_old_buffer = malloc(n_steps * sizeof(float));
   buf->advantage_buffer = malloc(n_steps * sizeof(float));
   buf->critic_buffer = malloc(n_steps * sizeof(float));
@@ -41,6 +47,16 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim) {
     if (!buf->state_buffer[i])
       goto fail;
   }
+
+#if USE_CONTINUOUS_ACTIONS
+  /* righe per la matrice delle azioni (N float per step) */
+  for (uint32_t i = 0; i < n_steps; ++i) {
+    buf->action_buffer[i] = malloc(action_dim * sizeof(action_t));
+    if (!buf->action_buffer[i])
+      goto fail;
+  }
+#endif
+
   return 1; /* tutto OK */
 
 fail: /* qualsiasi malloc fallita → libera e segnala errore */
@@ -85,20 +101,26 @@ int uart_recv_floats(UART_HandleTypeDef *huart, float *dst, size_t dim,
   return 1;
 }
 
+#if USE_CONTINUOUS_ACTIONS
+int uart_send_action(UART_HandleTypeDef *huart, float *actions,
+                     uint32_t action_dim, uint8_t done, uint32_t timeout) {
+  // Frame: [STX] [float_0] [float_1] ... [float_N-1] [done] [ETX]
+  uint32_t payload_size = action_dim * sizeof(float);
+  uint32_t frame_size = 1 + payload_size + 1 + 1; // STX + N floats + done + ETX
+  uint8_t frame[frame_size];
+  frame[0] = 0x02; // STX
+  memcpy(&frame[1], actions, payload_size);
+  frame[1 + payload_size] = done;
+  frame[1 + payload_size + 1] = 0x03; // ETX
+  return (HAL_UART_Transmit(huart, frame, frame_size, timeout) == HAL_OK);
+}
+#else
 int uart_send_action(UART_HandleTypeDef *huart, action_t action, uint8_t done,
                      uint32_t timeout) {
-#if USE_CONTINUOUS_ACTIONS
-  uint8_t frame[7];
-  frame[0] = 0x02; // STX
-  memcpy(&frame[1], &action, sizeof(float));
-  frame[5] = done;
-  frame[6] = 0x03; // ETX
-  return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
-#else
   uint8_t frame[] = {0x02, action, done, 0x03};
   return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
-#endif
 }
+#endif
 
 int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step,
                   uint32_t timeout) {
@@ -232,8 +254,10 @@ int step(SharedBackbone *net, float *obs, float manual_reward,
   if (!forward(net, obs, output_actor, output_critic))
     return 0;
 
-  action_t a;
   float log_prob;
+#if !USE_CONTINUOUS_ACTIONS
+  action_t a;
+#endif
 
 #if USE_CONTINUOUS_ACTIONS
   float progress = (float)net->adam_t / (float)(TOTAL_ADAM_STEPS + 1);
@@ -244,32 +268,30 @@ int step(SharedBackbone *net, float *obs, float manual_reward,
   if (current_sigma < 0.15f)
     current_sigma = 0.15f;
 
-  float mu = output_actor[0];
-  float a_raw = sample_continuous_action(mu, current_sigma);
+  // Loop generico su N dimensioni di azione
+  float log_prob_sum = 0.0f;
+  for (uint32_t i = 0; i < out_dim_actor; i++) {
+    float mu_i = output_actor[i];
+    float a_raw_i = sample_continuous_action(mu_i, current_sigma);
 
-  // SOFT GAUSSIAN CLIPPING (Fix for Gradient Explosion & Bias):
-  // Limit a_raw mathematically to mu +/- 3*sigma.
-  // This preserves the valid Gaussian PDF shape for 99.7% of samples,
-  // while actively blocking the 0.3% of extreme numerical outliers (a_raw
-  // = 4.0) that cause massive destructive gradient explosions ((a_raw -
-  // mu)/sigma^2).
-  float bound = 3.0f * current_sigma;
-  if (a_raw > mu + bound)
-    a_raw = mu + bound;
-  if (a_raw < mu - bound)
-    a_raw = mu - bound;
+    // SOFT GAUSSIAN CLIPPING per dimensione i
+    float bound = 3.0f * current_sigma;
+    if (a_raw_i > mu_i + bound)
+      a_raw_i = mu_i + bound;
+    if (a_raw_i < mu_i - bound)
+      a_raw_i = mu_i - bound;
 
-  // L'azione fisica mandata ai motori è SEMPRE rigidamente tagliata a [-1, 1]
-  a = fmaxf(fminf(a_raw, 1.0f), -1.0f);
-  *out_action = a;
+    // Hard clip [-1, 1] per l'azione fisica
+    out_action[i] = fmaxf(fminf(a_raw_i, 1.0f), -1.0f);
 
-  // IMPORTANTE: Calcoliamo la log_prob e riempiamo il buffer usando l'azione
-  // a_raw "Soft Clipped". Questo garantisce la validità matematica della PDF
-  // evitando che la policy venga "assorbita" e bloccata in modo irreversibile
-  // ai bordi +/- 2.0 (Action Saturation).
-  log_prob = gaussian_log_prob(a_raw, mu, current_sigma);
+    // Salva l'azione raw nel buffer 2D
+    buffer->action_buffer[*step_count][i] = a_raw_i;
 
-  buffer->action_buffer[*step_count] = a_raw;
+    // Accumula log_prob: log π(a|s) = Σ log N(a_i | mu_i, σ²)
+    log_prob_sum += gaussian_log_prob(a_raw_i, mu_i, current_sigma);
+  }
+  log_prob = log_prob_sum;
+
   buffer->sigma_buffer[*step_count] = current_sigma;
 #else
   a = (action_t)sample_action(output_actor, out_dim_actor);
@@ -689,7 +711,7 @@ void backward_shared_backbone(SharedBackbone *net, float *grad_from_actor,
 void backward_actor_critic(SharedBackbone *net, float *sensor_input,
                            float *output_actor_new, uint8_t out_dim,
                            float *output_critic_new, float ret_norm,
-                           action_t action_buf, float old_log_prob,
+                           action_t *action_buf, float old_log_prob,
                            float norm_adv, int current_batch_size,
                            float old_sigma) {
 
@@ -698,75 +720,62 @@ void backward_actor_critic(SharedBackbone *net, float *sensor_input,
   float d_logits_actor[out_dim];
 
 #if USE_CONTINUOUS_ACTIONS
-  // --- CASO CONTINUO ---
-  // Usa old_sigma: il sigma che era attivo al momento della RACCOLTA del
-  // rollout, calcolato una volta sola in finish_episode() prima di qualsiasi
-  // adam_t++. Questo garantisce che log_prob_old e log_prob_new usino la stessa
-  // distribuzione di riferimento, rendendo il ratio PPO matematicamente valido.
-  float mu = output_actor_new[0];
-  log_prob_new = gaussian_log_prob(action_buf, mu, old_sigma);
+  // --- CASO CONTINUO N-DIMENSIONALE ---
+  // 1. Calcolo log_prob_new totale come SOMMA delle log-prob per dimensione
+  //    log π(a|s) = Σ_i log N(a_i | mu_i, σ²)
+  log_prob_new = 0.0f;
+  for (int i = 0; i < out_dim; i++) {
+    log_prob_new +=
+        gaussian_log_prob(action_buf[i], output_actor_new[i], old_sigma);
+  }
 
-  // Clamp log-ratio BEFORE expf() to prevent inf/nan when policies diverge.
-  // Without this, expf(very_large_number) = INF -> grad_ppo = INF -> mu
-  // saturates to ±1.
-  // clamp to [-4, 4]
+  // 2. Clamp log-ratio BEFORE expf() per prevenire inf/nan
   float log_ratio = log_prob_new - old_log_prob;
-  log_ratio = clip(log_ratio, -4.0f,
-                   4.0f); // exp(±4) keeps ratio in safe range [0.018, 54]
+  log_ratio = clip(log_ratio, -4.0f, 4.0f);
   float ratio = expf(log_ratio);
 
-  // Calcolo del PPO Clip Surrogate Gradient Corretto
-  // Se la policy si sposta troppo (fuori dal trust region 1-eps .. 1+eps)
-  // il gradiente DEVE essere matematicamente 0.0f, bloccando l'ottimizzatore
-  // Adam.
-  float grad_ppo = 0.0f;
-  float d_log_prob = (action_buf - mu) / (old_sigma * old_sigma);
-
-  // STABILITY FIX: Hard limit the analytical gradient of the log_prob.
-  // When an outlier action is sampled (e.g. a - mu = 3.0) and sigma is small
-  // (e.g. 0.2), d_log_prob blows up to 75.0! Multiplied by an Advantage, this
-  // instantly destroys the Actor weights and permanently saturates Tanh to
-  // +/- 1.0. Standard PPO frameworks safely clamp this derivative.
-  d_log_prob = clip(d_log_prob, -5.0f, 5.0f);
-
+  // 3. Calcolo del PPO Clip Surrogate: il ratio e il clipping sono GLOBALI
+  //    (calcolati sulla log_prob totale), ma il gradiente è PER DIMENSIONE.
+  float clipped = 0; // Flag: il gradiente PPO è attivo?
   if (norm_adv > 0.0f) {
     if (ratio < 1.0f + EPS_CLIPPING) {
-      grad_ppo = -(ratio * norm_adv * d_log_prob);
-    } // altrimenti grad_ppo resta 0.0 (Capped)
+      clipped = 1;
+    }
   } else {
     if (ratio > 1.0f - EPS_CLIPPING) {
-      grad_ppo = -(ratio * norm_adv * d_log_prob);
-    } // altrimenti grad_ppo resta 0.0 (Capped)
+      clipped = 1;
+    }
   }
 
-  // Penalità L2 su mu: con sigma fisso, l'entropia gaussiana H =
-  // 0.5*log(2πe*σ²) non dipende da mu (∂H/∂mu = 0). Al suo posto usiamo una
-  // penalità L2 che spinge mu verso 0, prevenendo la saturazione del tanh
-  // verso ±1. ENT_BETA = 0.0 disabilita questo termine.
-  float grad_ent = ENT_BETA * mu;
+  // 4. Gradiente per OGNI dimensione i (indipendente da j ≠ i)
+  for (int i = 0; i < out_dim; i++) {
+    float mu_i = output_actor_new[i];
 
-  float d_mu = (grad_ppo + grad_ent) * batch_scale;
+    // ∂log π / ∂mu_i = (a_i - mu_i) / σ²
+    float d_log_prob_i = (action_buf[i] - mu_i) / (old_sigma * old_sigma);
+    d_log_prob_i = clip(d_log_prob_i, -5.0f, 5.0f);
 
-  // FIX CRITICO: Derivata dell'attivazione TANH dell'ultimo layer dell'Actor!
-  // La funzione backward_core_head tratta dout_last come dL/dz (derivata
-  // pre-attivazione). Quindi dobbiamo moltiplicare qui il nostro dL/dmu per
-  // (1 - mu^2). Se non lo facessimo, Tanh non saturerebbe i gradienti e i
-  // pesi esploderebbero a -inf o +inf, bloccando l'agente fisso a un'azione
-  // estrema (-2.0 o +2.0).
-  float tanh_deriv = 1.0f - mu * mu;
+    float grad_ppo_i = 0.0f;
+    if (clipped) {
+      grad_ppo_i = -(ratio * norm_adv * d_log_prob_i);
+    }
 
-  // Floor di sicurezza contro lo Strict Vanishing Gradient:
-  // Se mu è già accidentalmente a 1.0/-1.0, tanh_deriv sarebbe 0.0 e la rete
-  // non si sbloccherebbe MAI. Assicuriamo una deviazione minima per
-  // permettere all'adam di recuperare.
-  if (tanh_deriv < 0.05f) {
-    tanh_deriv = 0.05f;
+    // Penalità L2 su mu_i (previene saturazione tanh)
+    float grad_ent_i = ENT_BETA * mu_i;
+
+    float d_mu_i = (grad_ppo_i + grad_ent_i) * batch_scale;
+
+    // Derivata dell'attivazione TANH dell'ultimo layer Actor
+    float tanh_deriv_i = 1.0f - mu_i * mu_i;
+    if (tanh_deriv_i < 0.05f) {
+      tanh_deriv_i = 0.05f;
+    }
+
+    d_logits_actor[i] = d_mu_i * tanh_deriv_i;
   }
-
-  d_logits_actor[0] = d_mu * tanh_deriv;
 #else
   // --- CASO DISCRETO ---
-  float action_prob = output_actor_new[(uint8_t)action_buf];
+  float action_prob = output_actor_new[(uint8_t)action_buf[0]];
   log_prob_new = logf(action_prob + 1e-8f);
   float ratio = expf((log_prob_new - old_log_prob));
   float surr1 = ratio * norm_adv;
@@ -780,7 +789,7 @@ void backward_actor_critic(SharedBackbone *net, float *sensor_input,
     float grad_ent = 0.0f;
 
     if (surr1 <= surr2) {
-      if (i == (uint8_t)action_buf)
+      if (i == (uint8_t)action_buf[0])
         grad_ppo = -(1.0f - p) * norm_adv * ratio;
       else
         grad_ppo = p * norm_adv * ratio;
@@ -899,7 +908,13 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count,
             buf->critic_buffer[t];                      // A_norm (per Actor)
         float return_target = buf->advantage_buffer[t]; // R (per Critic)
         float old_log_prob = buf->log_prob_old_buffer[t];
-        action_t action = buf->action_buffer[t];
+#if USE_CONTINUOUS_ACTIONS
+        action_t *action =
+            buf->action_buffer[t]; // Puntatore alla riga [action_dim]
+#else
+        action_t action_scalar = buf->action_buffer[t];
+        action_t *action = &action_scalar; // backward si aspetta un puntatore
+#endif
 #if USE_CONTINUOUS_ACTIONS
         // Per-sample sigma: il sigma esatto usato per campionare questa
         // azione. È più preciso di sigma_at_collection (che usava adam_t
@@ -960,4 +975,3 @@ uint8_t done_check(float *state, uint32_t step){
         return 0;
 }
 */
-

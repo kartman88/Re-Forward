@@ -33,8 +33,9 @@ _STATE_STRUCT   = f"<{OBS_DIM}f"
 
 # Calcolo automatico della dimensione del frame in base alla tipologia di azione
 if USE_CONTINUOUS_ACTIONS:
-    ACTION_BYTE_SIZE = 4   # L'azione è un float (4 byte)
-    _ACTION_STRUCT = "<f"  # Little-endian float
+    ACTION_DIM = 1  # <-- Metti il numero di azioni (es. 2 per un braccio)
+    ACTION_BYTE_SIZE = 4 * ACTION_DIM
+    _ACTION_STRUCT = f"<{ACTION_DIM}f"   # N float little-endian
 else:
     ACTION_BYTE_SIZE = 1   # L'azione è un intero discreto (1 byte)
     _ACTION_STRUCT = "<B"  # Little-endian unsigned char (uint8)

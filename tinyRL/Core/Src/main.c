@@ -58,7 +58,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
 uint8_t done_check_pendulum(uint32_t ep_step);
-float evaluate_reward_pendulum(float *obs, action_t prev_action_raw);
+float evaluate_reward_pendulum(float *obs, action_t *prev_action_raw);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -72,10 +72,10 @@ uint8_t done_check_pendulum(uint32_t ep_step) {
   return 0;
 }
 
-float evaluate_reward_pendulum(float *obs, action_t prev_action_raw) {
+float evaluate_reward_pendulum(float *obs, action_t *prev_action_raw) {
   float theta = atan2f(obs[1], obs[0]);
   float theta_dt = obs[2] * 8.0f;
-  float torque = prev_action_raw * 2.0f;
+  float torque = prev_action_raw[0] * 2.0f; // Pendulum ha 1 sola azione
 
   if (torque > 2.0f)
     torque = 2.0f;
@@ -162,17 +162,19 @@ int main(void) {
   //-----BUFFER PARAMETER AND CREATION-----
   Buffer buffer;
   int buffer_size = MAX_STEPS;
-  buffer_init(&buffer, buffer_size, input_size);
+  buffer_init(&buffer, buffer_size, input_size, output_size);
   uint32_t step_count = 0;
   uint32_t num_episode = 0;
   uint8_t manual_done = 0;
-  action_t action = 0;
+  action_t action[output_size]; // Array di N azioni
   float manual_reward = 0;
   float obs[input_size];
   uint8_t train = 1;
 
   // Variabili Locali per la logica dell'ambiente (ex-Pendulum)
-  action_t prev_action_raw = 0.0f;
+  action_t prev_action_raw[output_size]; // Array di N azioni precedenti
+  for (int i = 0; i < output_size; i++)
+    prev_action_raw[i] = 0.0f;
   uint32_t ep_step = 0;
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
@@ -198,12 +200,12 @@ int main(void) {
       manual_reward = evaluate_reward_pendulum(obs, prev_action_raw);
 
       // --- CALLING GENERIC RL ENGINE ---
-      int status = step(&net, obs, manual_reward, manual_done, &action,
+      int status = step(&net, obs, manual_reward, manual_done, action,
                         &step_count, &buffer);
 
-      // Salviamo l'azione generata pre-clipping per il calcolo del reward al
-      // prossimo giro
-      prev_action_raw = action;
+      // Salviamo l'azione generata per il calcolo del reward al prossimo giro
+      for (int i = 0; i < output_size; i++)
+        prev_action_raw[i] = action[i];
 
       // --- 1. SE IL BUFFER È PIENO -> TRAINING ---
       if (status == 2) {
@@ -222,19 +224,27 @@ int main(void) {
 
       // Se il gioco continua (manual_done == 0), invia l'azione scalata
       if (manual_done == 0) {
-        float physical_action = action * 2.0f;
-        if (physical_action > 2.0f)
-          physical_action = 2.0f;
-        if (physical_action < -2.0f)
-          physical_action = -2.0f;
-        uart_send_action(&huart3, physical_action, manual_done, 50);
+        float physical_actions[output_size];
+        for (int i = 0; i < output_size; i++) {
+          physical_actions[i] = action[i] * 2.0f;
+          if (physical_actions[i] > 2.0f)
+            physical_actions[i] = 2.0f;
+          if (physical_actions[i] < -2.0f)
+            physical_actions[i] = -2.0f;
+        }
+        uart_send_action(&huart3, physical_actions, output_size, manual_done,
+                         50);
       }
       // Se l'episodio è finito, invia il reset e azzera
       else {
-        uart_send_action(&huart3, 0.0f, manual_done, 50);
+        float zero_actions[output_size];
+        for (int i = 0; i < output_size; i++)
+          zero_actions[i] = 0.0f;
+        uart_send_action(&huart3, zero_actions, output_size, manual_done, 50);
         num_episode++;
         ep_step = 0;
-        prev_action_raw = 0.0f; // Reset tracking action
+        for (int i = 0; i < output_size; i++)
+          prev_action_raw[i] = 0.0f;
       }
     }
 
