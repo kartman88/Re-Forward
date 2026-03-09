@@ -155,8 +155,9 @@ float gaussian_log_prob(float action, float mu, float sigma) {
 }
 #endif
 
-int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
-         uint8_t *done, uint32_t *step_count, Buffer *buffer) {
+int step(SharedBackbone *net, float *obs, float manual_reward,
+         uint8_t manual_done, action_t *out_action, uint32_t *step_count,
+         Buffer *buffer) {
 
   static uint8_t new_episode = 1;
   static uint32_t ep_step = 0;
@@ -168,22 +169,17 @@ int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
   if (!new_episode && *step_count > 0) {
     uint32_t prev_t = *step_count - 1;
 
-    // 1. Assegna il Reward dell'azione a_{t-1} valutata nello stato s_{t-1}
-    // anziché s_t (Riscatta il delay temporale con Gymnasium, che calcola il
-    // cost PRIMA dell'update fisico)
-    action_t prev_a = buffer->action_buffer[prev_t];
-    float *prev_step_obs = buffer->state_buffer[prev_t];
-    *reward = evaluate_reward(prev_step_obs, prev_a);
-    buffer->advantage_buffer[prev_t] = *reward;
+    // 1. IL MAGIC TRICK DEL TIMING (Data-Driven Step):
+    // La libreria NON calcola più il reward o il done. Prende 'manual_reward'
+    // e 'manual_done' forniti ciecamente dall'esterno (es. main.c) al tempo 't'
+    // e li assegna come CAUSA di ciò che l'Actor ha deciso al tempo 't-1'.
+    buffer->advantage_buffer[prev_t] = manual_reward;
+    buffer->done_buffer[prev_t] = manual_done;
 
-    // 2. Controllo Terminazione (avvenuta in s_t a causa di a_t-1)
-    *done = done_check(obs, ep_step);
-
-    if (*done > 0) {
-      buffer->done_buffer[prev_t] = *done;
+    if (manual_done > 0) {
 
       // BOOTSTRAP: Se Troncato (timeout), serve il V(s_t) futuro
-      if (*done == 1) {
+      if (manual_done == 1) {
         uint32_t out_dim_actor =
             net->actor.layers[net->actor.num_layers - 1].out_dim;
         uint32_t out_dim_critic =
@@ -214,9 +210,6 @@ int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
   if (*step_count >= MAX_STEPS) {
     // Abbiamo raccolto tutto il possibile, informiamo il main in modo da
     // avviare l'aggiornamento e resettare l'ambiente all'episodio successivo
-    *done = 1;
-    new_episode = 1;
-    ep_step = 0;
     return 2; // Trigger training code
   }
 
@@ -226,7 +219,7 @@ int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
   new_episode = 0; // Se eravamo in un nuovo episodio, ora non lo siamo più
 
   // Inizializza i flag futuri per sicurezza e ripulisce il ritorno per il main
-  *done = 0;
+  // Non modifichiamo output return done, lo gestisce il main
   buffer->done_buffer[*step_count] = 0;
   buffer->terminal_value_buffer[*step_count] = 0.0f;
 
@@ -268,7 +261,7 @@ int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
 
   // L'azione fisica mandata ai motori è SEMPRE rigidamente tagliata a [-1, 1]
   a = fmaxf(fminf(a_raw, 1.0f), -1.0f);
-  *action = a;
+  *out_action = a;
 
   // IMPORTANTE: Calcoliamo la log_prob e riempiamo il buffer usando l'azione
   // a_raw "Soft Clipped". Questo garantisce la validità matematica della PDF
@@ -282,7 +275,7 @@ int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
   a = (action_t)sample_action(output_actor, out_dim_actor);
   float action_prob = output_actor[(uint8_t)a];
   log_prob = logf(action_prob + 1e-8f);
-  *action = a;
+  *out_action = a;
 
   buffer->action_buffer[*step_count] = a;
 #endif
@@ -966,83 +959,5 @@ uint8_t done_check(float *state, uint32_t step){
         }
         return 0;
 }
-
-float evaluate_reward(float *state){
-        return 1.f;
-}*/
-
-/*CODE FOR PENDULUM*/
-uint8_t done_check(float *state, uint32_t step) {
-  // Il documento conferma che non ci sono condizioni di "out of bounds".
-  // Si tronca solo al raggiungimento dei 200 step.
-  if (step >= ROLLOUT) {
-    return 1; // Timeout
-  }
-  return 0;
-}
-
-// --- Funzione di Reward ---
-// --- Funzione di Reward ---
-float evaluate_reward(float *state, action_t prev_action_raw) {
-  float theta = atan2f(state[1], state[0]);
-
-  // 1. RIPRISTINA LA SCALA FISICA (In Python avevamo diviso per 8 per mappare
-  // in [-1,1]) NOTA: Questo conferma che la Rete Neurale (lo Shared Trunk)
-  // riceve state[2] GIA' confinato nell'intervallo ideale [-1, 1], rendendo
-  // l'input perfettamente omogeneo a Cos e Sin!
-  float theta_dt = state[2] * 8.0f;
-
-  // 2. RIPRISTINA LA COPPIA FISICA (Da -1..1 astratto a -2..2 fisico)
-  float torque = prev_action_raw * 2.0f;
-
-  // ---> MODIFICA: Clipping per allinearsi all'azione reale eseguita via UART
-  if (torque > 2.0f)
-    torque = 2.0f;
-  if (torque < -2.0f)
-    torque = -2.0f;
-
-  // 3. Formula Esatta
-  float cost = (theta * theta) + 0.1f * (theta_dt * theta_dt) +
-               0.001f * (torque * torque);
-
-  // 4. SCALA IL REWARD
-  return -cost / 10.0f; //-cost / 10.0f
-}
-
-/*CODE FOR ACROBOT
-uint8_t done_check(float *state, uint32_t step){
-        uint16_t a1 = 20;
-        uint16_t a2 = 10;
-        uint32_t goal1 = 0;
-        uint32_t goal2 = 180;
-        float cos1 = state[0];
-        float sin1 = state[1];
-        float cos2 = state[2];
-        float sin2 = state[3];
-        float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
-        float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
-        uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
-        uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
-        if((angle2_reached) || step>=500) return 1;
-        else return 0;
-}
-
-
-float evaluate_reward(float *state, uint32_t step){
-        int reward = -1;
-        uint16_t a1 = 20;
-        uint16_t a2 = 10;
-        uint32_t goal1 = 0;
-        uint32_t goal2 = 180;
-        float cos1 = state[0];
-        float sin1 = state[1];
-        float cos2 = state[2];
-        float sin2 = state[3];
-        float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
-        float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
-        uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
-        uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
-        if((angle2_reached) && (angle1_reached)) reward = reward + 100;
-        return reward;
-}
 */
+

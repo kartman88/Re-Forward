@@ -57,11 +57,35 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
+uint8_t done_check_pendulum(uint32_t ep_step);
+float evaluate_reward_pendulum(float *obs, action_t prev_action_raw);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint8_t done_check_pendulum(uint32_t ep_step) {
+  // Timeout a 200 step per Pendulum
+  if (ep_step >= ROLLOUT) {
+    return 1;
+  }
+  return 0;
+}
+
+float evaluate_reward_pendulum(float *obs, action_t prev_action_raw) {
+  float theta = atan2f(obs[1], obs[0]);
+  float theta_dt = obs[2] * 8.0f;
+  float torque = prev_action_raw * 2.0f;
+
+  if (torque > 2.0f)
+    torque = 2.0f;
+  if (torque < -2.0f)
+    torque = -2.0f;
+
+  float cost = (theta * theta) + 0.1f * (theta_dt * theta_dt) +
+               0.001f * (torque * torque);
+  return -cost / 10.0f;
+}
 
 /* USER CODE END 0 */
 
@@ -141,11 +165,15 @@ int main(void) {
   buffer_init(&buffer, buffer_size, input_size);
   uint32_t step_count = 0;
   uint32_t num_episode = 0;
-  uint8_t done = 0;
+  uint8_t manual_done = 0;
   action_t action = 0;
-  float reward = 0;
+  float manual_reward = 0;
   float obs[input_size];
   uint8_t train = 1;
+
+  // Variabili Locali per la logica dell'ambiente (ex-Pendulum)
+  action_t prev_action_raw = 0.0f;
+  uint32_t ep_step = 0;
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
@@ -159,37 +187,54 @@ int main(void) {
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
       HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
 
-      // La libreria RL prende il controllo completo della logica
-      obs[2] = obs[2] / 8;
-      int status =
-          step(&net, obs, &action, &reward, &done, &step_count, &buffer);
+      obs[2] = obs[2] / 8.0f;
+
+      // --- ENVIRONMENT LOGIC (PENDULUM) ---
+      // 1. Calcolo del DONE (Timeout)
+      manual_done = done_check_pendulum(ep_step);
+
+      // 2. Calcolo del REWARD (Basato sullo stato corrente di arrivo e
+      // sull'azione che l'ha causato)
+      manual_reward = evaluate_reward_pendulum(obs, prev_action_raw);
+
+      // --- CALLING GENERIC RL ENGINE ---
+      int status = step(&net, obs, manual_reward, manual_done, &action,
+                        &step_count, &buffer);
+
+      // Salviamo l'azione generata pre-clipping per il calcolo del reward al
+      // prossimo giro
+      prev_action_raw = action;
 
       // --- 1. SE IL BUFFER È PIENO -> TRAINING ---
       if (status == 2) {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
         if (train == 1)
-          finish_episode(&buffer, &net, MAX_STEPS, done);
+          finish_episode(&buffer, &net, MAX_STEPS, 1); // Pass 1 for buffer-full termination
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
         step_count = 0;
+        ep_step = 0; // Reset local counter along with buffer
         // num_episode lo incrementiamo sotto, quando inviamo il done
       }
 
       // --- 2. COMUNICAZIONE UART CON L'AMBIENTE ---
-      // Se il gioco continua (done == 0), invia l'azione scalata
-      if (done == 0) {
-        action = action * 2.0f;
-        if (action > 2.0f)
-          action = 2.0f;
-        if (action < -2.0f)
-          action = -2.0f;
-        uart_send_action(&huart3, action, done, 50);
+      ep_step++; // Increment step tracker
+
+      // Se il gioco continua (manual_done == 0), invia l'azione scalata
+      if (manual_done == 0) {
+        float physical_action = action * 2.0f;
+        if (physical_action > 2.0f)
+          physical_action = 2.0f;
+        if (physical_action < -2.0f)
+          physical_action = -2.0f;
+        uart_send_action(&huart3, physical_action, manual_done, 50);
       }
-      // Se l'episodio è finito (fisiologicamente O per via del buffer pieno),
-      // invia il reset
+      // Se l'episodio è finito, invia il reset e azzera
       else {
-        uart_send_action(&huart3, 0.0f, done, 50);
+        uart_send_action(&huart3, 0.0f, manual_done, 50);
         num_episode++;
+        ep_step = 0;
+        prev_action_raw = 0.0f; // Reset tracking action
       }
     }
 

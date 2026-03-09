@@ -41,16 +41,13 @@ int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step,
 // sample action
 uint32_t sample_action(float *p, uint32_t action_dim);
 // step function
-int step(SharedBackbone *net, float *obs, action_t *action, float *reward,
-         uint8_t *done, uint32_t *step_count, Buffer *buffer);
+int step(SharedBackbone *net, float *obs, float manual_reward,
+         uint8_t manual_done, action_t *out_action, uint32_t *step_count,
+         Buffer *buffer);
 // finish episode
 uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count,
                         uint8_t done);
 // evaluate returns and advantages
 void evaluate_advantages_and_returns(Buffer *buf, uint32_t step_count);
-// done function cartpole
-uint8_t done_check(float *state, uint32_t step);
-// reward function
-float evaluate_reward(float *state, action_t prev_action_raw);
 
 #endif
