@@ -22,7 +22,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "neural_net.h"
-#include "reinforce.h"
 #include "utils.h"
 #include <stdio.h>
 
@@ -57,36 +56,10 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-uint8_t done_check_pendulum(uint32_t ep_step);
-float evaluate_reward_pendulum(float *obs, action_t *prev_action_raw);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-uint8_t done_check_pendulum(uint32_t ep_step) {
-  // Timeout a 200 step per Pendulum
-  if (ep_step >= ROLLOUT) {
-    return 1;
-  }
-  return 0;
-}
-
-float evaluate_reward_pendulum(float *obs, action_t *prev_action_raw) {
-  float theta = atan2f(obs[1], obs[0]);
-  float theta_dt = obs[2] * 8.0f;
-  float torque = prev_action_raw[0] * 2.0f; // Pendulum ha 1 sola azione
-
-  if (torque > 2.0f)
-    torque = 2.0f;
-  if (torque < -2.0f)
-    torque = -2.0f;
-
-  float cost = (theta * theta) + 0.1f * (theta_dt * theta_dt) +
-               0.001f * (torque * torque);
-  return -cost / 10.0f;
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -124,134 +97,39 @@ int main(void) {
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   dwt_init();
+  srand(HAL_GetTick());
+
+  // --- TASK 1 TEST: QNetwork + TargetNetwork init and forward ---
+  QNetwork    online;
+  TargetNetwork target;
+  int topology[]         = {4, 32, 32, N_ACTIONS};
+  ActivationType acts[]  = {ACT_RELU, ACT_RELU, ACT_NONE};
+
+  int ok = init_qnetwork(&online, 4, topology, acts) &&
+           init_target_network(&target, 4, topology);
+
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0,  GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+  if (ok)
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = init OK
+  else
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);  // LD3 = alloc fail
+
+  float obs[4]      = {0.1f, -0.2f, 0.3f, -0.1f};
+  float q[N_ACTIONS];
+  float qt[N_ACTIONS];
+
+  forward_q(&online, obs, q);
+  copy_weights_to_target(&online, &target);
+  forward_target(&target, obs, qt);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  // random seed to generate initial weight
-  srand(HAL_GetTick());
-  //-----NETWORK PARAMETERS AND CREATION-----
-  int input_size = 3;
-
-#if USE_CONTINUOUS_ACTIONS
-  int output_size = 1; // L'Actor genera solo la Media (Mu)
-  ActivationType activations_actor_layers[] = {
-      ACT_TANH}; // Bound action space inside [-1, 1] range!
-#else
-  int output_size = 2; // N azioni discrete
-  ActivationType activations_actor_layers[] = {ACT_RELU, ACT_SOFTMAX};
-#endif
-
-  // create neural network
-  SharedBackbone net;
-  int num_layers = 2;        // Trunk: Input -> 32
-  int num_layers_actor = 2;  // Actor Link + Out: 32 -> 16 -> 1
-  int num_layers_critic = 2; // Critic Link + Out: 32 -> 16 -> 1
-  int net_topology[] = {input_size, 32};
-  int net_topology_actor[] = {16, output_size};
-  int net_topology_critic[] = {16, 1};
-  ActivationType activations[] = {ACT_RELU, ACT_RELU}; // Per i Trunk Layers
-  ActivationType activations_critic_layers[] = {
-      ACT_NONE}; // Layer interni Critic
-
-  int is_ok = init_network(&net, num_layers, num_layers_actor,
-                           num_layers_critic, net_topology, net_topology_actor,
-                           net_topology_critic, activations,
-                           activations_actor_layers, activations_critic_layers);
-
-  //-----BUFFER PARAMETER AND CREATION-----
-  Buffer buffer;
-  int buffer_size = MAX_STEPS;
-  buffer_init(&buffer, buffer_size, input_size, output_size);
-  uint32_t step_count = 0;
-  uint32_t num_episode = 0;
-  uint8_t manual_done = 0;
-  action_t action[output_size]; // Array di N azioni
-  float manual_reward = 0;
-  float obs[input_size];
-  uint8_t train = 1;
-
-  // Variabili Locali per la logica dell'ambiente (ex-Pendulum)
-  action_t prev_action_raw[output_size]; // Array di N azioni precedenti
-  for (int i = 0; i < output_size; i++)
-    prev_action_raw[i] = 0.0f;
-  uint32_t ep_step = 0;
-
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-  if (is_ok)
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
-  else
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-
   while (1) {
-    if (uart_recv_floats(&huart3, obs, net_topology[0], 50)) {
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
-
-      obs[2] = obs[2] / 8.0f;
-
-      // --- ENVIRONMENT LOGIC (PENDULUM) ---
-      // 1. Calcolo del DONE (Timeout)
-      manual_done = done_check_pendulum(ep_step);
-
-      // 2. Calcolo del REWARD (Basato sullo stato corrente di arrivo e
-      // sull'azione che l'ha causato)
-      manual_reward = evaluate_reward_pendulum(obs, prev_action_raw);
-
-      // --- CALLING GENERIC RL ENGINE ---
-      int status = step(&net, obs, manual_reward, manual_done, action,
-                        &step_count, &buffer);
-
-      // Salviamo l'azione generata per il calcolo del reward al prossimo giro
-      for (int i = 0; i < output_size; i++)
-        prev_action_raw[i] = action[i];
-
-      // --- 1. SE IL BUFFER È PIENO -> TRAINING ---
-      if (status == 2) {
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET);
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
-        if (train == 1)
-          finish_episode(&buffer, &net, MAX_STEPS, 1); // Pass 1 for buffer-full termination
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-        step_count = 0;
-        ep_step = 0; // Reset local counter along with buffer
-        // num_episode lo incrementiamo sotto, quando inviamo il done
-      }
-
-      // --- 2. COMUNICAZIONE UART CON L'AMBIENTE ---
-      ep_step++; // Increment step tracker
-
-      // Se il gioco continua (manual_done == 0), invia l'azione scalata
-      if (manual_done == 0) {
-        float physical_actions[output_size];
-        for (int i = 0; i < output_size; i++) {
-          physical_actions[i] = action[i] * 2.0f;
-          if (physical_actions[i] > 2.0f)
-            physical_actions[i] = 2.0f;
-          if (physical_actions[i] < -2.0f)
-            physical_actions[i] = -2.0f;
-        }
-        uart_send_action(&huart3, physical_actions, output_size, manual_done,
-                         50);
-      }
-      // Se l'episodio è finito, invia il reset e azzera
-      else {
-        float zero_actions[output_size];
-        for (int i = 0; i < output_size; i++)
-          zero_actions[i] = 0.0f;
-        uart_send_action(&huart3, zero_actions, output_size, manual_done, 50);
-        num_episode++;
-        ep_step = 0;
-        for (int i = 0; i < output_size; i++)
-          prev_action_raw[i] = 0.0f;
-      }
-    }
-
-    if (num_episode > MAX_EPISODE) {
-      // train = 0;
-      // break;
-    }
+    // LD2 blinks to signal the test completed without crash
+    HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+    HAL_Delay(500);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

@@ -4,63 +4,52 @@
 #include <math.h>
 #include <stdint.h>
 
-#define LR 0.0005f // 0.0005f
-#define BETA1 0.9f
-#define BETA2 0.999f
-#define EPS_ADAM 1e-8f
-#define GAMMA 0.99f
-#define ENT_BETA 0.0f // L2 penalty on mu to prevent tanh saturation (exploration)
-#define STARTING_ACTION_SIGMA 0.8f // Initial std dev for continuous actions
-#define CRIT_LOSS 0.5
-#define MAX_EPISODE 400
-#define MAX_STEPS 2000
-#define BATCH_SIZE 64 // 64
-#define ROLLOUT 200
-
-#define N_EPOCHS 10
-// Total expected adam_optimizer() calls over the full training run.
-// adam_t increments once per mini-batch (not per env step), so the correct
-// denominator for sigma decay is: episodes × (buffer / batch) × epochs.
-#define TOTAL_ADAM_STEPS (MAX_EPISODE * (MAX_STEPS / BATCH_SIZE) * N_EPOCHS)
-#define EPS_CLIPPING 0.2f
-#define CRITIC_COEFF 2.0F
-// #define ENTROPY_W 0.001 //0.001 good for CartPole
-#define PPO_EPSILON 0.2 // 0.2
-
-#define USE_CONTINUOUS_ACTIONS 1 // 1=Continuo (es. Pendulum), 0=Discreto (es. CartPole)
-
-#if USE_CONTINUOUS_ACTIONS
-typedef float action_t;
-#else
-typedef uint8_t action_t;
-#endif
+// DQN Hyperparameters
+#define LR              0.001f
+#define BETA1           0.9f
+#define BETA2           0.999f
+#define EPS_ADAM        1e-8f
+#define GAMMA           0.99f
+#define EPSILON_START   1.0f
+#define EPSILON_END     0.05f
+#define EPSILON_DECAY   5000
+#define TARGET_UPDATE   200
+#define REPLAY_MIN      500
+#define REPLAY_SIZE     1000
+#define BATCH_SIZE      32
+#define MAX_EPISODE     500
+#define N_ACTIONS       2
 
 typedef struct {
-  DenseLayer *layers;
-  uint8_t num_layers;
-} Head;
+    DenseLayer *layers;
+    uint8_t     num_layers;
+    uint32_t    adam_t;
+} QNetwork;
 
 typedef struct {
-  DenseLayer *layers;
-  uint8_t num_layers;
-  uint32_t adam_t; // adam steps counter
-  Head actor;
-  Head critic;
-} SharedBackbone;
+    float         **W;
+    float          *b;
+    float          *out;
+    int             in_dim;
+    int             out_dim;
+    ActivationType  activation;
+} TargetLayer;
 
-int init_network(SharedBackbone *net, int num_layers, int num_layers_actor,
-                 int num_layers_critic, int *net_topology,
-                 int *net_topology_actor, int *net_topology_critic,
-                 ActivationType *activations, ActivationType *activations_actor,
-                 ActivationType *activations_critic);
+typedef struct {
+    TargetLayer *layers;
+    uint8_t      num_layers;
+} TargetNetwork;
+
 void softmax(float *in, float *out, int n);
-int forward(SharedBackbone *net, float *input, float *output_actor,
-            float *output_critic);
-void backward_core(SharedBackbone *net, float *dout_last, float *input);
-void backward_pg(SharedBackbone *net, float *input, action_t action,
-                 float advantage, float reward, uint32_t step_count);
-void adam_optimizer(SharedBackbone *net);
-void gradient_norm_l2(SharedBackbone *net);
-void zero_grad(SharedBackbone *net);
+
+int  init_qnetwork(QNetwork *net, int num_layers, int *topology,
+                   ActivationType *activations);
+int  init_target_network(TargetNetwork *tgt, int num_layers, int *topology);
+int  forward_q(QNetwork *net, float *input, float *q_out);
+int  forward_target(TargetNetwork *tgt, float *input, float *q_out);
+void copy_weights_to_target(QNetwork *src, TargetNetwork *dst);
+void adam_optimizer_q(QNetwork *net);
+void gradient_norm_q(QNetwork *net);
+void zero_grad_q(QNetwork *net);
 
 #endif
