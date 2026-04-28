@@ -22,18 +22,19 @@ USE_CONTINUOUS_ACTIONS = True     # Metti a False per tornare al CartPole Discre
 # Parametri Grafici
 PLOT_EVERY_N_EPISODES = 5
 CONSOLE_LINES = 5
+RENDER = True  # True per visualizzare l'ambiente (più lento), False per velocità massima
 
 # ------------------------------------------------------------
 #  DIMENSIONI TASK
 # ------------------------------------------------------------
-ENV_NAME        = "Pendulum-v1" if USE_CONTINUOUS_ACTIONS else "CartPole-v1"
-OBS_DIM         = 3 if USE_CONTINUOUS_ACTIONS else 4  # Aggiorna in base all'ambiente!
+ENV_NAME        = "Swimmer-v5" if USE_CONTINUOUS_ACTIONS else "CartPole-v1"
+OBS_DIM         = 8 if USE_CONTINUOUS_ACTIONS else 4  # Swimmer: 3 angoli + 5 velocità
 
 _STATE_STRUCT   = f"<{OBS_DIM}f"
 
 # Calcolo automatico della dimensione del frame in base alla tipologia di azione
 if USE_CONTINUOUS_ACTIONS:
-    ACTION_DIM = 1  # <-- Metti il numero di azioni (es. 2 per un braccio)
+    ACTION_DIM = 2  # Swimmer: 2 torque sui rotori
     ACTION_BYTE_SIZE = 4 * ACTION_DIM
     _ACTION_STRUCT = f"<{ACTION_DIM}f"   # N float little-endian
 else:
@@ -55,9 +56,16 @@ def recv_action_done(ser: serial.Serial):
     frame = ser.read(_ACTION_FRAME_LEN)
     if len(frame) == _ACTION_FRAME_LEN and frame[0] == 0x02 and frame[-1] == 0x03:
         
-        # Estrae i byte dell'azione e li spacchetta nel tipo corretto (float o int)
+        # Estrae i byte dell'azione e li spacchetta nel tipo corretto
         action_bytes = frame[1:1 + ACTION_BYTE_SIZE]
-        action_val = struct.unpack(_ACTION_STRUCT, action_bytes)[0]
+        action_vals = struct.unpack(_ACTION_STRUCT, action_bytes)
+        
+        # Per azioni continue multi-dim, action_vals è una tupla di N float
+        # Per azioni discrete, è una tupla con un singolo uint8
+        if USE_CONTINUOUS_ACTIONS:
+            action_val = list(action_vals)  # Lista di N float
+        else:
+            action_val = action_vals[0]     # Singolo intero
         
         # Estrae il done flag (penultimo byte)
         done_flag = bool(frame[-2])
@@ -83,7 +91,10 @@ def main():
         return
 
     # Inizializza Ambiente
-    env = gym.make(ENV_NAME, render_mode="human") #, render_mode="human"
+    if RENDER:
+        env = gym.make(ENV_NAME, render_mode="human")
+    else:
+        env = gym.make(ENV_NAME)
     
     # Setup Grafici (Matplotlib)
     plt.ion()
@@ -109,7 +120,7 @@ def main():
     ax_action.set_xlabel("Valore Azione")
     ax_action.set_ylabel("Frequenza")
     if USE_CONTINUOUS_ACTIONS:
-        ax_action.set_xlim(-2.0, 2.0)  # Tipico range per Pendulum
+        ax_action.set_xlim(-1.0, 1.0)  # Range azioni Swimmer [-1, 1]
     hist_patches = ax_action.patches
 
     # Variabili di stato
@@ -132,7 +143,8 @@ def main():
             action_wait_start = time.time()
 
             while not done:
-                env.render()
+                if RENDER:
+                    env.render()
                 now_ms = time.time() * 1000
 
                 # 1. Ritrasmissione robusta
@@ -150,7 +162,10 @@ def main():
                 # ---- FRAME VALIDO RICEVUTO ----
                 action_val, mcu_done = pkt
                 state_sent = False 
-                all_actions.append(action_val)  # Raccogli l'azione
+                if USE_CONTINUOUS_ACTIONS:
+                    all_actions.extend(action_val)  # Appiattisce N azioni nella lista
+                else:
+                    all_actions.append(action_val)  # Singola azione discreta
                 
                 # 3. Controllo se il micro ha appena fatto training
                 wait_time = time.time() - action_wait_start
@@ -160,8 +175,8 @@ def main():
 
                 # 4. Formattazione dell'Azione per Gymnasium
                 if USE_CONTINUOUS_ACTIONS:
-                    # Gli ambienti continui richiedono un array numpy
-                    action_to_env = np.array([action_val], dtype=np.float32)
+                    # Gli ambienti continui richiedono un array numpy di N azioni
+                    action_to_env = np.array(action_val, dtype=np.float32)
                 else:
                     # Gli ambienti discreti richiedono un intero
                     action_to_env = int(action_val)
