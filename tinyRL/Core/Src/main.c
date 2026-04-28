@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "neural_net.h"
+#include "dqn.h"
 #include "utils.h"
 #include <stdio.h>
 
@@ -60,6 +61,16 @@ static void MX_USART3_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#define MAX_STEPS_PER_EP  200
+
+static const float PENDULUM_TORQUES[N_ACTIONS] = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
+
+static float evaluate_reward_pendulum(const float *obs, uint32_t act) {
+    float theta = atan2f(obs[1], obs[0]);
+    float omega = obs[2];
+    float u     = PENDULUM_TORQUES[act];
+    return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u);
+}
 /* USER CODE END 0 */
 
 /**
@@ -99,37 +110,80 @@ int main(void) {
   dwt_init();
   srand(HAL_GetTick());
 
-  // --- TASK 1 TEST: QNetwork + TargetNetwork init and forward ---
-  QNetwork    online;
+  QNetwork      online;
   TargetNetwork target;
-  int topology[]         = {4, 32, 32, N_ACTIONS};
-  ActivationType acts[]  = {ACT_RELU, ACT_RELU, ACT_NONE};
+  ReplayBuffer  replay;
 
-  int ok = init_qnetwork(&online, 4, topology, acts) &&
-           init_target_network(&target, 4, topology);
+  int topology[]        = {OBS_DIM, 64, 64, N_ACTIONS};
+  ActivationType acts[] = {ACT_RELU, ACT_RELU, ACT_NONE};
+
+  int init_ok = init_qnetwork(&online, 4, topology, acts) &&
+                init_target_network(&target, 4, topology) &&
+                replay_buffer_init(&replay, REPLAY_SIZE, OBS_DIM);
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0,  GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
-  if (ok)
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = init OK
-  else
+  if (init_ok) {
+      copy_weights_to_target(&online, &target);
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = ready
+  } else {
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);  // LD3 = alloc fail
+      while (1);
+  }
 
-  float obs[4]      = {0.1f, -0.2f, 0.3f, -0.1f};
-  float q[N_ACTIONS];
-  float qt[N_ACTIONS];
-
-  forward_q(&online, obs, q);
-  copy_weights_to_target(&online, &target);
-  forward_target(&target, obs, qt);
+  float    obs[OBS_DIM];
+  float    prev_obs[OBS_DIM];
+  uint32_t action      = 0;
+  uint32_t step_total  = 0;
+  uint32_t train_step  = 0;
+  uint32_t num_episode = 0;
+  uint32_t step_in_ep  = 0;
+  uint8_t  first_step  = 1;
+  uint8_t  manual_done;
+  float    manual_reward;
+  float    epsilon;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
-    // LD2 blinks to signal the test completed without crash
-    HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
-    HAL_Delay(500);
+    if (!uart_recv_floats(&huart3, obs, OBS_DIM, 100))
+        continue;
+
+    manual_done   = (step_in_ep >= MAX_STEPS_PER_EP);
+    manual_reward = first_step ? 0.0f
+                               : evaluate_reward_pendulum(obs, action);
+
+    if (!first_step)
+        replay_buffer_push(&replay, prev_obs, action,
+                           manual_reward, obs, manual_done);
+
+    if (replay.size >= REPLAY_MIN) {
+        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+        dqn_train(&online, &target, &replay, BATCH_SIZE, N_ACTIONS);
+        train_step++;
+        if (train_step % TARGET_UPDATE == 0)
+            copy_weights_to_target(&online, &target);
+        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+    }
+
+    epsilon = calc_epsilon(step_total);
+    action  = dqn_select_action(&online, obs, epsilon, N_ACTIONS);
+
+    memcpy(prev_obs, obs, OBS_DIM * sizeof(float));
+    first_step = 0;
+
+    uart_send_float_action(&huart3, PENDULUM_TORQUES[action], manual_done, 100);
+
+    if (manual_done) {
+        memset(prev_obs, 0, sizeof(prev_obs));
+        first_step = 1;
+        step_in_ep = 0;
+        num_episode++;
+    } else {
+        step_in_ep++;
+    }
+    step_total++;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -145,42 +199,45 @@ void SystemClock_Config(void) {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
-   */
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /** Configure the main internal regulator output voltage
-   */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+  /* VOS1 richiesto per 480 MHz */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
-  }
-
-  /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  /* HSI 64 MHz → PLL1: DIVM=4 (16 MHz), DIVN=60 (960 MHz VCO), DIVP=2 → 480 MHz SYSCLK */
+  RCC_OscInitStruct.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState            = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState        = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource       = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM            = 4;
+  RCC_OscInitStruct.PLL.PLLN            = 60;
+  RCC_OscInitStruct.PLL.PLLP            = 2;   /* SYSCLK = 480 MHz */
+  RCC_OscInitStruct.PLL.PLLQ            = 4;   /* 240 MHz, disponibile per periferiche */
+  RCC_OscInitStruct.PLL.PLLR            = 2;
+  RCC_OscInitStruct.PLL.PLLRGE          = RCC_PLL1VCIRANGE_3; /* VCI 8–16 MHz */
+  RCC_OscInitStruct.PLL.PLLVCOSEL       = RCC_PLL1VCOWIDE;    /* VCO 192–960 MHz */
+  RCC_OscInitStruct.PLL.PLLFRACN        = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
-                                RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
-  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+  /* SYSCLK = PLL1P = 480 MHz
+     AHB = 240 MHz (DIV2), APB1/2/3/4 = 120 MHz (DIV2) */
+  RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                     RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
+                                     RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKDivider  = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider  = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK) {
+  /* Flash latency 4 cicli richiesti a 480 MHz VOS1 */
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) {
     Error_Handler();
   }
 }

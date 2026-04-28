@@ -3,7 +3,8 @@
 ../Core/Src/neural_net.c:117:5:init_target_network	7
 ../Core/Src/neural_net.c:139:5:forward_q	15
 ../Core/Src/neural_net.c:151:5:forward_target	15
-../Core/Src/neural_net.c:163:6:copy_weights_to_target	5
-../Core/Src/neural_net.c:174:6:zero_grad_q	5
-../Core/Src/neural_net.c:183:6:gradient_norm_q	15
-../Core/Src/neural_net.c:208:6:adam_optimizer_q	8
+../Core/Src/neural_net.c:163:6:dqn_backward	18
+../Core/Src/neural_net.c:222:6:copy_weights_to_target	5
+../Core/Src/neural_net.c:233:6:zero_grad_q	5
+../Core/Src/neural_net.c:242:6:gradient_norm_q	15
+../Core/Src/neural_net.c:267:6:adam_optimizer_q	8

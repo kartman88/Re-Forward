@@ -160,6 +160,65 @@ int forward_target(TargetNetwork *tgt, float *input, float *q_out) {
     return 1;
 }
 
+void dqn_backward(QNetwork *net, float *input, uint32_t action,
+                  float td_error) {
+    // Sparse output gradient: only position 'action' is non-zero
+    static float delta_out[N_ACTIONS];
+    static float *delta_buf = NULL;
+    static uint32_t delta_cap = 0;
+
+    int out_dim_last = net->layers[net->num_layers - 1].out_dim;
+    for (int i = 0; i < out_dim_last; i++)
+        delta_out[i] = 0.0f;
+    delta_out[action] = td_error;
+
+    float *delta = delta_out;
+
+    for (int l = net->num_layers - 1; l >= 0; --l) {
+        DenseLayer *ly       = &net->layers[l];
+        const int   in_dim   = ly->in_dim;
+        const int   out_dim  = ly->out_dim;
+        const float *inp     = (l == 0) ? input : net->layers[l - 1].out;
+
+        // Accumulate gradients for this layer
+        float *restrict db = ly->db;
+        for (int i = 0; i < out_dim; ++i) {
+            float di = delta[i];
+            db[i] += di;
+            float *restrict dw_row = ly->dW[i];
+            for (int j = 0; j < in_dim; ++j)
+                dw_row[j] += di * inp[j];
+        }
+
+        // Propagate delta to the layer below (not needed at input layer)
+        if (l > 0) {
+            if ((uint32_t)in_dim > delta_cap) {
+                free(delta_buf);
+                delta_buf = malloc(in_dim * sizeof(float));
+                delta_cap = (uint32_t)in_dim;
+                if (!delta_buf) return;
+            }
+
+            const float    *h_prev = net->layers[l - 1].out;
+            ActivationType  act    = net->layers[l - 1].activation;
+
+            for (int j = 0; j < in_dim; ++j) {
+                float acc = 0.0f;
+                for (int i = 0; i < out_dim; ++i)
+                    acc += delta[i] * ly->W[i][j];
+                float hp = h_prev[j];
+                switch (act) {
+                case ACT_RELU: acc = (hp > 0.f) ? acc : 0.f; break;
+                case ACT_TANH: acc = acc * (1.f - hp * hp);  break;
+                default: break;
+                }
+                delta_buf[j] = acc;
+            }
+            delta = delta_buf;
+        }
+    }
+}
+
 void copy_weights_to_target(QNetwork *src, TargetNetwork *dst) {
     for (int l = 0; l < src->num_layers; l++) {
         DenseLayer  *sl = &src->layers[l];

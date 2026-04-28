@@ -1,4 +1,5 @@
 "./Core/Src/dense_layer.o"
+"./Core/Src/dqn.o"
 "./Core/Src/main.o"
 "./Core/Src/neural_net.o"
 "./Core/Src/reinforce.o"
