@@ -9,22 +9,21 @@
 #define BETA2 0.999f
 #define EPS_ADAM 1e-8f
 #define GAMMA 0.99f
-#define ENT_BETA                                                               \
-  0.0f // L2 penalty on mu to prevent tanh saturation (exploration)
-#define STARTING_ACTION_SIGMA 0.8f // Initial std dev for continuous actions
+#define ENT_BETA 0.01f // Entropy bonus weight (used only for discrete actor and softmax regularizer)
+#define STARTING_ACTION_SIGMA 1.0f // Initial std dev for continuous actions
 #define CRIT_LOSS 0.5
-#define MAX_EPISODE 1000
-#define MAX_STEPS 2000
+#define MAX_EPISODE 8000
+#define MAX_STEPS 2048
 #define BATCH_SIZE 64 // 64
 #define ROLLOUT 1000
 
-#define N_EPOCHS 5
+#define N_EPOCHS 3
 // Total expected adam_optimizer() calls over the full training run.
 // adam_t increments once per mini-batch (not per env step), so the correct
 // denominator for sigma decay is: episodes × (buffer / batch) × epochs.
 #define TOTAL_ADAM_STEPS (MAX_EPISODE * (MAX_STEPS / BATCH_SIZE) * N_EPOCHS)
 #define EPS_CLIPPING 0.2f
-#define CRITIC_COEFF 2.0F
+#define CRITIC_COEFF 0.5f
 // #define ENTROPY_W 0.001 //0.001 good for CartPole
 #define PPO_EPSILON 0.2 // 0.2
 
@@ -45,7 +44,8 @@ typedef struct {
 typedef struct {
   DenseLayer *layers;
   uint8_t num_layers;
-  uint32_t adam_t; // adam steps counter
+  uint32_t adam_t;        // adam steps counter
+  uint32_t episode_count; // contatore episodi completati (per sigma decay)
   Head actor;
   Head critic;
 } SharedBackbone;

@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define STARTING_ACTION_SIGMA 0.8f // For continuous action exploration
+// STARTING_ACTION_SIGMA è definita in neural_net.h (singola fonte di verità)
 
 typedef struct {
   float **state_buffer;
@@ -18,7 +18,11 @@ typedef struct {
   action_t *action_buffer; // Vettore [n_steps] per azione discreta scalare
 #endif
   uint8_t *done_buffer;
+#if USE_CONTINUOUS_ACTIONS
+  float **log_prob_per_dim_buffer; // [n_steps][action_dim] — per-dim log-prob
+#else
   float *log_prob_old_buffer;
+#endif
   float *advantage_buffer;
   float *critic_buffer;
   float *terminal_value_buffer;

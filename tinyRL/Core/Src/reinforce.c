@@ -16,7 +16,11 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim,
   /* azzera i campi così, in caso di errore, i free sono sicuri */
   buf->state_buffer = NULL;
   buf->action_buffer = NULL;
+#if USE_CONTINUOUS_ACTIONS
+  buf->log_prob_per_dim_buffer = NULL;
+#else
   buf->log_prob_old_buffer = NULL;
+#endif
   buf->advantage_buffer = NULL;
   buf->critic_buffer = NULL;
   buf->sigma_buffer = NULL;
@@ -27,19 +31,28 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim,
   buf->state_buffer = malloc(n_steps * sizeof(float *));
 #if USE_CONTINUOUS_ACTIONS
   buf->action_buffer = malloc(n_steps * sizeof(action_t *));
+  buf->log_prob_per_dim_buffer = malloc(n_steps * sizeof(float *));
 #else
   buf->action_buffer = malloc(n_steps * sizeof(action_t));
-#endif
   buf->log_prob_old_buffer = malloc(n_steps * sizeof(float));
+#endif
   buf->advantage_buffer = malloc(n_steps * sizeof(float));
   buf->critic_buffer = malloc(n_steps * sizeof(float));
   buf->done_buffer = calloc((n_steps + 1), sizeof(uint8_t));
   buf->terminal_value_buffer = calloc((n_steps + 1), sizeof(float));
   buf->sigma_buffer = malloc(n_steps * sizeof(float));
 
-  if (!buf->state_buffer || !buf->action_buffer || !buf->log_prob_old_buffer ||
-      !buf->advantage_buffer || !buf->critic_buffer || !buf->sigma_buffer)
+#if USE_CONTINUOUS_ACTIONS
+  if (!buf->state_buffer || !buf->action_buffer || !buf->log_prob_per_dim_buffer ||
+      !buf->advantage_buffer || !buf->critic_buffer || !buf->sigma_buffer ||
+      !buf->done_buffer || !buf->terminal_value_buffer)
     goto fail;
+#else
+  if (!buf->state_buffer || !buf->action_buffer || !buf->log_prob_old_buffer ||
+      !buf->advantage_buffer || !buf->critic_buffer || !buf->sigma_buffer ||
+      !buf->done_buffer || !buf->terminal_value_buffer)
+    goto fail;
+#endif
 
   /* righe per la matrice delle osservazioni */
   for (uint32_t i = 0; i < n_steps; ++i) {
@@ -55,6 +68,12 @@ int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim,
     if (!buf->action_buffer[i])
       goto fail;
   }
+  /* righe per le log-prob per-dimensione (N float per step) */
+  for (uint32_t i = 0; i < n_steps; ++i) {
+    buf->log_prob_per_dim_buffer[i] = malloc(action_dim * sizeof(float));
+    if (!buf->log_prob_per_dim_buffer[i])
+      goto fail;
+  }
 #endif
 
   return 1; /* tutto OK */
@@ -65,8 +84,21 @@ fail: /* qualsiasi malloc fallita → libera e segnala errore */
       free(buf->state_buffer[i]);
     free(buf->state_buffer);
   }
+#if USE_CONTINUOUS_ACTIONS
+  if (buf->action_buffer) {
+    for (uint32_t i = 0; i < n_steps; ++i)
+      free(buf->action_buffer[i]);
+    free(buf->action_buffer);
+  }
+  if (buf->log_prob_per_dim_buffer) {
+    for (uint32_t i = 0; i < n_steps; ++i)
+      free(buf->log_prob_per_dim_buffer[i]);
+    free(buf->log_prob_per_dim_buffer);
+  }
+#else
   free(buf->action_buffer);
   free(buf->log_prob_old_buffer);
+#endif
   free(buf->advantage_buffer);
   free(buf->critic_buffer);
   free(buf->sigma_buffer);
@@ -230,9 +262,17 @@ int step(SharedBackbone *net, float *obs, float manual_reward,
   // FASE 2: GESTIONE RIEMPIMENTO BUFFER
   // =========================================================================
   if (*step_count >= MAX_STEPS) {
-    // Abbiamo raccolto tutto il possibile, informiamo il main in modo da
-    // avviare l'aggiornamento e resettare l'ambiente all'episodio successivo
-    return 2; // Trigger training code
+    // Bootstrap: buffer pieno ma episodio ancora in corso.
+    // Senza questo, GAE userebbe V=0 come valore futuro, sottostimando i return.
+    if (buffer->done_buffer[*step_count - 1] == 0) {
+      uint32_t oa = net->actor.layers[net->actor.num_layers - 1].out_dim;
+      uint32_t oc = net->critic.layers[net->critic.num_layers - 1].out_dim;
+      float tmp_a[oa], tmp_c[oc];
+      forward(net, obs, tmp_a, tmp_c);
+      buffer->terminal_value_buffer[*step_count - 1] = tmp_c[0];
+      buffer->done_buffer[*step_count - 1] = 1;
+    }
+    return 2;
   }
 
   // =========================================================================
@@ -254,43 +294,39 @@ int step(SharedBackbone *net, float *obs, float manual_reward,
   if (!forward(net, obs, output_actor, output_critic))
     return 0;
 
-  float log_prob;
 #if !USE_CONTINUOUS_ACTIONS
+  float log_prob;
   action_t a;
 #endif
 
 #if USE_CONTINUOUS_ACTIONS
-  float progress = (float)net->adam_t / (float)(TOTAL_ADAM_STEPS + 1);
+  // Sigma decay basato su episodi reali (non adam_t).
+  // adam_t cresce con i mini-batch (dipende da batch_size, n_epochs e
+  // dimensione del rollout) e fa decadere sigma troppo in fretta o troppo
+  // lentamente a seconda della task. Usare episode_count rende il decay
+  // indipendente dalla cadenza di training.
+  float progress = (float)net->episode_count / (float)(MAX_EPISODE + 1);
   if (progress > 1.0f)
     progress = 1.0f;
 
-  float current_sigma = STARTING_ACTION_SIGMA * (1.0f - progress) + 0.15f;
-  if (current_sigma < 0.15f)
-    current_sigma = 0.15f;
+  float current_sigma = STARTING_ACTION_SIGMA * (1.0f - progress) + 0.2f;
+  if (current_sigma < 0.2f)
+    current_sigma = 0.2f;
 
   // Loop generico su N dimensioni di azione
-  float log_prob_sum = 0.0f;
   for (uint32_t i = 0; i < out_dim_actor; i++) {
     float mu_i = output_actor[i];
     float a_raw_i = sample_continuous_action(mu_i, current_sigma);
+    float a_clipped_i = fmaxf(fminf(a_raw_i, 1.0f), -1.0f);
 
-    // SOFT GAUSSIAN CLIPPING per dimensione i
-    float bound = 3.0f * current_sigma;
-    if (a_raw_i > mu_i + bound)
-      a_raw_i = mu_i + bound;
-    if (a_raw_i < mu_i - bound)
-      a_raw_i = mu_i - bound;
-
-    // Hard clip [-1, 1] per l'azione fisica
-    out_action[i] = fmaxf(fminf(a_raw_i, 1.0f), -1.0f);
-
-    // Salva l'azione raw nel buffer 2D
+    out_action[i] = a_clipped_i;
+    // Store raw (pre-clip) action: when mu saturates to ±1 and a_clipped==mu,
+    // using a_clipped gives d_log_prob=(a-mu)/σ²=0, killing the gradient.
+    // Using a_raw ensures (a_raw - mu)/σ² ≠ 0 and the policy can recover.
     buffer->action_buffer[*step_count][i] = a_raw_i;
-
-    // Accumula log_prob: log π(a|s) = Σ log N(a_i | mu_i, σ²)
-    log_prob_sum += gaussian_log_prob(a_raw_i, mu_i, current_sigma);
+    buffer->log_prob_per_dim_buffer[*step_count][i] =
+        gaussian_log_prob(a_raw_i, mu_i, current_sigma);
   }
-  log_prob = log_prob_sum;
 
   buffer->sigma_buffer[*step_count] = current_sigma;
 #else
@@ -305,7 +341,9 @@ int step(SharedBackbone *net, float *obs, float manual_reward,
   // Salva i dati correnti nel buffer allo slot `t`
   memcpy(buffer->state_buffer[*step_count], obs,
          net->layers[0].in_dim * sizeof(float));
+#if !USE_CONTINUOUS_ACTIONS
   buffer->log_prob_old_buffer[*step_count] = log_prob;
+#endif
   buffer->critic_buffer[*step_count] = output_critic[0];
 
   // Incrementa contatori per prepararsi al passo futuro `t+1`
@@ -711,7 +749,7 @@ void backward_shared_backbone(SharedBackbone *net, float *grad_from_actor,
 void backward_actor_critic(SharedBackbone *net, float *sensor_input,
                            float *output_actor_new, uint8_t out_dim,
                            float *output_critic_new, float ret_norm,
-                           action_t *action_buf, float old_log_prob,
+                           action_t *action_buf, float *old_log_prob_per_dim,
                            float norm_adv, int current_batch_size,
                            float old_sigma) {
 
@@ -720,64 +758,56 @@ void backward_actor_critic(SharedBackbone *net, float *sensor_input,
   float d_logits_actor[out_dim];
 
 #if USE_CONTINUOUS_ACTIONS
-  // --- CASO CONTINUO N-DIMENSIONALE ---
-  // 1. Calcolo log_prob_new totale come SOMMA delle log-prob per dimensione
-  //    log π(a|s) = Σ_i log N(a_i | mu_i, σ²)
-  log_prob_new = 0.0f;
-  for (int i = 0; i < out_dim; i++) {
-    log_prob_new +=
-        gaussian_log_prob(action_buf[i], output_actor_new[i], old_sigma);
-  }
-
-  // 2. Clamp log-ratio BEFORE expf() per prevenire inf/nan
-  float log_ratio = log_prob_new - old_log_prob;
-  log_ratio = clip(log_ratio, -4.0f, 4.0f);
-  float ratio = expf(log_ratio);
-
-  // 3. Calcolo del PPO Clip Surrogate: il ratio e il clipping sono GLOBALI
-  //    (calcolati sulla log_prob totale), ma il gradiente è PER DIMENSIONE.
-  float clipped = 0; // Flag: il gradiente PPO è attivo?
-  if (norm_adv > 0.0f) {
-    if (ratio < 1.0f + EPS_CLIPPING) {
-      clipped = 1;
-    }
-  } else {
-    if (ratio > 1.0f - EPS_CLIPPING) {
-      clipped = 1;
-    }
-  }
-
-  // 4. Gradiente per OGNI dimensione i (indipendente da j ≠ i)
+  // --- CASO CONTINUO: clipping PPO PER-DIMENSIONE ---
+  // Ogni azione ha il proprio ratio r_i = π_new_i / π_old_i e il proprio
+  // clip check. Questo evita che una dimensione con ratio fuori bounds blocchi
+  // il gradiente di tutte le altre (problema del ratio congiunto con N > 1).
+  ActivationType last_act =
+      net->actor.layers[net->actor.num_layers - 1].activation;
   for (int i = 0; i < out_dim; i++) {
     float mu_i = output_actor_new[i];
 
-    // ∂log π / ∂mu_i = (a_i - mu_i) / σ²
+    float log_p_new_i =
+        gaussian_log_prob(action_buf[i], mu_i, old_sigma);
+    float log_r_i = log_p_new_i - old_log_prob_per_dim[i];
+    log_r_i = clip(log_r_i, -4.0f, 4.0f);
+    float r_i = expf(log_r_i);
+
+    // Clip check indipendente per la dimensione i
+    uint8_t active_i = 0;
+    if (norm_adv > 0.0f) {
+      if (r_i < 1.0f + EPS_CLIPPING) active_i = 1;
+    } else {
+      if (r_i > 1.0f - EPS_CLIPPING) active_i = 1;
+    }
+
+    // ∂log π_i / ∂mu_i = (a_i - mu_i) / σ²
     float d_log_prob_i = (action_buf[i] - mu_i) / (old_sigma * old_sigma);
     d_log_prob_i = clip(d_log_prob_i, -5.0f, 5.0f);
 
-    float grad_ppo_i = 0.0f;
-    if (clipped) {
-      grad_ppo_i = -(ratio * norm_adv * d_log_prob_i);
+    float grad_ppo_i = active_i ? -(r_i * norm_adv * d_log_prob_i) : 0.0f;
+    float d_mu_i = grad_ppo_i * batch_scale;
+
+    switch (last_act) {
+    case ACT_TANH: {
+      float deriv = 1.0f - mu_i * mu_i;
+      if (deriv < 0.05f) deriv = 0.05f;
+      d_logits_actor[i] = d_mu_i * deriv;
+      break;
     }
-
-    // Penalità L2 su mu_i (previene saturazione tanh)
-    float grad_ent_i = ENT_BETA * mu_i;
-
-    float d_mu_i = (grad_ppo_i + grad_ent_i) * batch_scale;
-
-    // Derivata dell'attivazione TANH dell'ultimo layer Actor
-    float tanh_deriv_i = 1.0f - mu_i * mu_i;
-    if (tanh_deriv_i < 0.05f) {
-      tanh_deriv_i = 0.05f;
+    case ACT_RELU:
+      d_logits_actor[i] = (mu_i > 0.0f) ? d_mu_i : 0.0f;
+      break;
+    default:
+      d_logits_actor[i] = d_mu_i;
+      break;
     }
-
-    d_logits_actor[i] = d_mu_i * tanh_deriv_i;
   }
 #else
   // --- CASO DISCRETO ---
   float action_prob = output_actor_new[(uint8_t)action_buf[0]];
   log_prob_new = logf(action_prob + 1e-8f);
-  float ratio = expf((log_prob_new - old_log_prob));
+  float ratio = expf((log_prob_new - old_log_prob_per_dim[0]));
   float surr1 = ratio * norm_adv;
   float surr2 = clip(ratio, 1.0f - 0.2f, 1.0f + 0.2f) * norm_adv;
 
@@ -907,11 +937,12 @@ uint32_t finish_episode(Buffer *buf, SharedBackbone *net, uint32_t step_count,
         float normalized_advantage =
             buf->critic_buffer[t];                      // A_norm (per Actor)
         float return_target = buf->advantage_buffer[t]; // R (per Critic)
-        float old_log_prob = buf->log_prob_old_buffer[t];
 #if USE_CONTINUOUS_ACTIONS
+        float *old_log_prob = buf->log_prob_per_dim_buffer[t]; // [action_dim]
         action_t *action =
             buf->action_buffer[t]; // Puntatore alla riga [action_dim]
 #else
+        float *old_log_prob = &buf->log_prob_old_buffer[t];
         action_t action_scalar = buf->action_buffer[t];
         action_t *action = &action_scalar; // backward si aspetta un puntatore
 #endif

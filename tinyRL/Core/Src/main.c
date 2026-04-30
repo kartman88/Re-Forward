@@ -57,28 +57,39 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-uint8_t done_check_swimmer(uint32_t ep_step);
-float evaluate_reward_swimmer(float *obs, action_t *prev_actions);
+uint8_t done_check_hopper(float *obs, uint32_t ep_step);
+float evaluate_reward_hopper(float *obs, action_t *prev_actions);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-uint8_t done_check_swimmer(uint32_t ep_step) {
-  // Swimmer non termina mai, solo truncation a 1000 step
+uint8_t done_check_hopper(float *obs, uint32_t ep_step) {
+  // obs[0]=z (height), obs[1]=angle (torso pitch)
+  // Healthy: z in [0.7, inf), |angle| <= 0.2 rad
+  float z     = obs[0];
+  float angle = obs[1];
+  if (z < 0.7f || angle < -0.2f || angle > 0.2f) {
+    return 2; // terminated (caduta)
+  }
   if (ep_step >= ROLLOUT) {
-    return 1;
+    return 1; // truncated (timeout)
   }
   return 0;
 }
 
-float evaluate_reward_swimmer(float *obs, action_t *prev_actions) {
-  // obs[3] = velocità x della punta (front tip) ≈ forward_reward (dx/dt)
-  float forward_reward = obs[3];
-  // ctrl_cost = 0.0001 * ||actions||²
-  float ctrl_cost = 0.0001f * (prev_actions[0] * prev_actions[0] +
-                               prev_actions[1] * prev_actions[1]);
-  return forward_reward - ctrl_cost;
+float evaluate_reward_hopper(float *obs, action_t *prev_actions) {
+  // obs[5] = velocità x del torso (forward velocity)
+  // Weight 2x: makes forward motion worth 2 pts/step at v=1 m/s vs healthy=1 pt/step.
+  // Without this, surviving motionless (reward=1/step) is competitive with slow walking.
+  float forward_reward = 2.0f * obs[5];
+  // ctrl_cost = 0.001 * ||actions||² (coeff Gymnasium default)
+  float ctrl_cost = 0.001f * (prev_actions[0] * prev_actions[0] +
+                               prev_actions[1] * prev_actions[1] +
+                               prev_actions[2] * prev_actions[2]);
+  // healthy_reward = 1.0 per ogni step vivo
+  float healthy_reward = 1.0f;
+  return forward_reward - ctrl_cost + healthy_reward;
 }
 
 /* USER CODE END 0 */
@@ -125,25 +136,25 @@ int main(void) {
   // random seed to generate initial weight
   srand(HAL_GetTick());
   //-----NETWORK PARAMETERS AND CREATION-----
-  int input_size = 8; // Swimmer: 3 angoli + 5 velocità
+  int input_size = 11; // Hopper: 5 posizioni + 6 velocità
 
 #if USE_CONTINUOUS_ACTIONS
-  int output_size = 2; // Swimmer: 2 torque (rotori)
+  int output_size = 3; // Hopper: 3 torque (hip, knee, ankle)
   ActivationType activations_actor_layers[] = {
-      ACT_TANH}; // Bound action space inside [-1, 1] range!
+      ACT_TANH}; // Bound mu in [-1, 1] structurally → previene divergenza
 #else
-  int output_size = 2; // N azioni discrete
+  int output_size = 3; // N azioni discrete
   ActivationType activations_actor_layers[] = {ACT_RELU, ACT_SOFTMAX};
 #endif
 
   // create neural network
   SharedBackbone net;
-  int num_layers = 2;        // Backbone: 8 -> 64
-  int num_layers_actor = 2;  // Actor: 32 -> 2
-  int num_layers_critic = 2; // Critic: 32 -> 1
+  int num_layers = 2;        // Backbone: 11 -> 64
+  int num_layers_actor = 2;  // Actor: 64 -> 3
+  int num_layers_critic = 2; // Critic: 64 -> 1
   int net_topology[] = {input_size, 64};
-  int net_topology_actor[] = {32, output_size};
-  int net_topology_critic[] = {32, 1};
+  int net_topology_actor[] = {64, output_size};
+  int net_topology_critic[] = {64, 1};
   ActivationType activations[] = {ACT_RELU, ACT_RELU}; // Per i Trunk Layers
   ActivationType activations_critic_layers[] = {
       ACT_NONE}; // Layer interni Critic
@@ -178,17 +189,18 @@ int main(void) {
   else
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
 
+
   while (1) {
     if (uart_recv_floats(&huart3, obs, net_topology[0], 50)) {
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
       HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_0);
 
-      // --- ENVIRONMENT LOGIC (SWIMMER) ---
-      // 1. Calcolo del DONE (Solo timeout)
-      manual_done = done_check_swimmer(ep_step);
+      // --- ENVIRONMENT LOGIC (HOPPER) ---
+      // 1. Calcolo del DONE (caduta o timeout)
+      manual_done = done_check_hopper(obs, ep_step);
 
-      // 2. Calcolo del REWARD (forward velocity - ctrl cost)
-      manual_reward = evaluate_reward_swimmer(obs, prev_action_raw);
+      // 2. Calcolo del REWARD (forward velocity - ctrl cost + healthy reward)
+      manual_reward = evaluate_reward_hopper(obs, prev_action_raw);
 
       // --- CALLING GENERIC RL ENGINE ---
       int status = step(&net, obs, manual_reward, manual_done, action,
@@ -207,28 +219,35 @@ int main(void) {
                          1); // Pass 1 for buffer-full termination
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
         step_count = 0;
-        ep_step = 0; // Reset local counter along with buffer
-        // num_episode lo incrementiamo sotto, quando inviamo il done
-      }
-
-      // --- 2. COMUNICAZIONE UART CON L'AMBIENTE ---
-      ep_step++; // Increment step tracker
-
-      // Se il gioco continua (manual_done == 0), invia le azioni direttamente
-      // (Swimmer usa [-1, 1] nativo, nessuno scaling necessario)
-      if (manual_done == 0) {
-        uart_send_action(&huart3, action, output_size, manual_done, 50);
-      }
-      // Se l'episodio è finito, invia il reset e azzera
-      else {
-        float zero_actions[output_size];
-        for (int i = 0; i < output_size; i++)
-          zero_actions[i] = 0.0f;
-        uart_send_action(&huart3, zero_actions, output_size, manual_done, 50);
-        num_episode++;
         ep_step = 0;
+        // Invia azione neutra: non abbiamo un'azione fresca calcolata
+        // sull'osservazione corrente (Phase 3 non è stata eseguita).
+        float zero_action[output_size];
         for (int i = 0; i < output_size; i++)
-          prev_action_raw[i] = 0.0f;
+          zero_action[i] = 0.0f;
+        uart_send_action(&huart3, zero_action, output_size, 0, 50);
+      }
+      // --- 2. COMUNICAZIONE UART CON L'AMBIENTE ---
+      // ep_step++ solo se non abbiamo appena resettato il buffer
+      else {
+        ep_step++;
+
+        // Se il gioco continua (manual_done == 0), invia le azioni direttamente
+        if (manual_done == 0) {
+          uart_send_action(&huart3, action, output_size, manual_done, 50);
+        }
+        // Se l'episodio è finito, invia il reset e azzera
+        else {
+          float zero_actions[output_size];
+          for (int i = 0; i < output_size; i++)
+            zero_actions[i] = 0.0f;
+          uart_send_action(&huart3, zero_actions, output_size, manual_done, 50);
+          num_episode++;
+          net.episode_count++; // usato per il sigma decay in step()
+          ep_step = 0;
+          for (int i = 0; i < output_size; i++)
+            prev_action_raw[i] = 0.0f;
+        }
       }
     }
 

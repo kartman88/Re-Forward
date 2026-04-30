@@ -9,6 +9,7 @@ int init_network(SharedBackbone *net, int num_layers, int num_layers_actor,
                  ActivationType *activations, ActivationType *activations_actor,
                  ActivationType *activations_critic) {
   net->adam_t = 0;
+  net->episode_count = 0;
   net->layers =
       // +2: one slot for link_actor, one for link_critic (both live in
       // net->layers)

@@ -27,14 +27,14 @@ RENDER = True  # True per visualizzare l'ambiente (più lento), False per veloci
 # ------------------------------------------------------------
 #  DIMENSIONI TASK
 # ------------------------------------------------------------
-ENV_NAME        = "Swimmer-v5" if USE_CONTINUOUS_ACTIONS else "CartPole-v1"
-OBS_DIM         = 8 if USE_CONTINUOUS_ACTIONS else 4  # Swimmer: 3 angoli + 5 velocità
+ENV_NAME        = "Hopper-v5" if USE_CONTINUOUS_ACTIONS else "CartPole-v1"
+OBS_DIM         = 11 if USE_CONTINUOUS_ACTIONS else 4  # Hopper: 5 posizioni + 6 velocità
 
 _STATE_STRUCT   = f"<{OBS_DIM}f"
 
 # Calcolo automatico della dimensione del frame in base alla tipologia di azione
 if USE_CONTINUOUS_ACTIONS:
-    ACTION_DIM = 2  # Swimmer: 2 torque sui rotori
+    ACTION_DIM = 3  # Hopper: 3 torque (hip, knee, ankle)
     ACTION_BYTE_SIZE = 4 * ACTION_DIM
     _ACTION_STRUCT = f"<{ACTION_DIM}f"   # N float little-endian
 else:
@@ -98,30 +98,35 @@ def main():
     
     # Setup Grafici (Matplotlib)
     plt.ion()
-    fig, (ax_reward, ax_action) = plt.subplots(1, 2, figsize=(15, 5))
-    
+    n_action_plots = ACTION_DIM if USE_CONTINUOUS_ACTIONS else 1
+    total_cols = 1 + n_action_plots
+    fig, axes = plt.subplots(1, total_cols, figsize=(5 * total_cols, 5))
+    ax_reward = axes[0]
+    ax_actions = axes[1:] if n_action_plots > 1 else [axes[1]]
+
     # --- Subplot Reward ---
     ax_reward.set_title(f"Training PPO su STM32 - {ENV_NAME}")
     ax_reward.set_xlabel("Episodi")
     ax_reward.set_ylabel("Reward")
-    
+
     reward_history = []
     moving_avg_history = []
     moving_avg_queue = deque(maxlen=20)
     console_history = deque(maxlen=CONSOLE_LINES)
-    all_actions = []  # Raccoglie tutte le azioni
-    
+    # Una lista per ogni dimensione di azione
+    all_actions = [[] for _ in range(n_action_plots)]
+
     line_raw, = ax_reward.plot([], [], 'b-', alpha=0.3, label='Reward Grezzo')
     line_avg, = ax_reward.plot([], [], 'r-', linewidth=2, label='Media Mobile (20 ep)')
     ax_reward.legend()
-    
-    # --- Subplot Action Distribution ---
-    ax_action.set_title("Distribuzione Azioni")
-    ax_action.set_xlabel("Valore Azione")
-    ax_action.set_ylabel("Frequenza")
-    if USE_CONTINUOUS_ACTIONS:
-        ax_action.set_xlim(-1.0, 1.0)  # Range azioni Swimmer [-1, 1]
-    hist_patches = ax_action.patches
+
+    # --- Subplot Action Distribution (uno per azione) ---
+    for i, ax in enumerate(ax_actions):
+        ax.set_title(f"Distribuzione Azione {i}")
+        ax.set_xlabel("Valore Azione")
+        ax.set_ylabel("Frequenza")
+        if USE_CONTINUOUS_ACTIONS:
+            ax.set_xlim(-1.0, 1.0)
 
     # Variabili di stato
     episode_count = 0
@@ -163,9 +168,10 @@ def main():
                 action_val, mcu_done = pkt
                 state_sent = False 
                 if USE_CONTINUOUS_ACTIONS:
-                    all_actions.extend(action_val)  # Appiattisce N azioni nella lista
+                    for i, v in enumerate(action_val):
+                        all_actions[i].append(v)
                 else:
-                    all_actions.append(action_val)  # Singola azione discreta
+                    all_actions[0].append(action_val)
                 
                 # 3. Controllo se il micro ha appena fatto training
                 wait_time = time.time() - action_wait_start
@@ -183,18 +189,16 @@ def main():
                 
                 # Step nell'ambiente fisico
                 obs, r, terminated, truncated, _ = env.step(action_to_env)
-                #print("REWARD:", r)  # Debug: stampa il reward ricevuto
-                #Divido per 8 l'obs[2] per normalizzare
-                #obs[2] /= 8
-                
+                #print(f'REWARD_ISTANTANEO: {r:.2f} | TERMINATED: {terminated} | TRUNCATED: {truncated} | MCU_DONE: {mcu_done} | WAIT_TIME: {wait_time:.2f}s')
+
                 # LA VERA MAGIA: Ci fidiamo SOLO del microcontrollore!
-                done = mcu_done  
-                
+                done = mcu_done
+
                 current_ep_reward += r
                 global_step += 1
-                
+
                 # Resettiamo il cronometro per il prossimo step
-                action_wait_start = time.time() 
+                action_wait_start = time.time()
 
             # ---- FINE EPISODIO ----
             reward_history.append(current_ep_reward)
@@ -235,16 +239,17 @@ def main():
                 ax_reward.relim()
                 ax_reward.autoscale_view()
                 
-                # Aggiorna l'istogramma delle azioni
-                ax_action.clear()
-                ax_action.set_title("Distribuzione Azioni")
-                ax_action.set_xlabel("Valore Azione")
-                ax_action.set_ylabel("Frequenza")
-                if USE_CONTINUOUS_ACTIONS:
-                    ax_action.hist(all_actions, bins=30, color='green', alpha=0.7, edgecolor='black')
-                    ax_action.set_xlim(-2.0, 2.0)
-                else:
-                    ax_action.hist(all_actions, bins=range(0, 5), color='green', alpha=0.7, edgecolor='black')
+                # Aggiorna l'istogramma delle azioni (un subplot per azione)
+                for i, ax in enumerate(ax_actions):
+                    ax.clear()
+                    ax.set_title(f"Distribuzione Azione {i}")
+                    ax.set_xlabel("Valore Azione")
+                    ax.set_ylabel("Frequenza")
+                    if USE_CONTINUOUS_ACTIONS:
+                        ax.hist(all_actions[i], bins=30, color='green', alpha=0.7, edgecolor='black')
+                        ax.set_xlim(-2.0, 2.0)
+                    else:
+                        ax.hist(all_actions[i], bins=range(0, 5), color='green', alpha=0.7, edgecolor='black')
                 
                 fig.canvas.draw()
                 fig.canvas.flush_events()
