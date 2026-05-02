@@ -41,28 +41,8 @@ static inline void forward_dense_layer(const float *restrict in_vec,
         softmax(out_vec, out_vec, out_dim);
 }
 
-static inline void forward_target_layer(const float *restrict in_vec,
-                                         float *restrict out_vec,
-                                         const TargetLayer *restrict layer) {
-    const int in_dim  = layer->in_dim;
-    const int out_dim = layer->out_dim;
-    for (int i = 0; i < out_dim; ++i) {
-        float acc = layer->b[i];
-        const float *restrict w_row = layer->W[i];
-        for (int j = 0; j < in_dim; ++j)
-            acc += w_row[j] * in_vec[j];
-        switch (layer->activation) {
-        case ACT_RELU: out_vec[i] = (acc > 0.f) ? acc : 0.f; break;
-        case ACT_TANH: out_vec[i] = tanhf(acc);               break;
-        default:       out_vec[i] = acc;                       break;
-        }
-    }
-    if (layer->activation == ACT_SOFTMAX)
-        softmax(out_vec, out_vec, out_dim);
-}
-
 static void adam_update_single_layer(DenseLayer *restrict ly,
-                                      float b1t, float b2t) {
+                                      float b1t, float b2t, float lr) {
     const int out_dim = ly->out_dim;
     const int in_dim  = ly->in_dim;
 
@@ -74,7 +54,7 @@ static void adam_update_single_layer(DenseLayer *restrict ly,
         ly->vb[i] = vb;
         float m_hat = mb / b1t;
         float v_hat = vb / b2t;
-        ly->b[i]  -= LR * m_hat / (sqrtf(v_hat) + EPS_ADAM);
+        ly->b[i]  -= lr * m_hat / (sqrtf(v_hat) + EPS_ADAM);
         ly->db[i]  = 0.0f;
     }
 
@@ -91,14 +71,14 @@ static void adam_update_single_layer(DenseLayer *restrict ly,
             vw_row[j]  = vw;
             float m_hat = mw / b1t;
             float v_hat = vw / b2t;
-            w_row[j]  -= LR * m_hat / (sqrtf(v_hat) + EPS_ADAM);
+            w_row[j]  -= lr * m_hat / (sqrtf(v_hat) + EPS_ADAM);
             dw_row[j]  = 0.0f;
         }
     }
 }
 
-int init_qnetwork(QNetwork *net, int num_layers, int *topology,
-                  ActivationType *activations) {
+int network_init(Network *net, int num_layers, int *topology,
+                 ActivationType *activations) {
     net->adam_t     = 0;
     int n_weights   = num_layers - 1;
     net->num_layers = (uint8_t)n_weights;
@@ -114,73 +94,31 @@ int init_qnetwork(QNetwork *net, int num_layers, int *topology,
     return 1;
 }
 
-int init_target_network(TargetNetwork *tgt, int num_layers, int *topology) {
-    int n_weights   = num_layers - 1;
-    tgt->num_layers = (uint8_t)n_weights;
-    tgt->layers     = malloc(n_weights * sizeof(TargetLayer));
-    if (!tgt->layers)
-        return 0;
-    for (int i = 0; i < n_weights; i++) {
-        int in_d  = topology[i];
-        int out_d = topology[i + 1];
-        tgt->layers[i].in_dim     = in_d;
-        tgt->layers[i].out_dim    = out_d;
-        tgt->layers[i].activation = ACT_NONE;
-        if (!alloc_2d(&tgt->layers[i].W, out_d, in_d))
-            return 0;
-        tgt->layers[i].b   = calloc(out_d, sizeof(float));
-        tgt->layers[i].out = malloc(out_d * sizeof(float));
-        if (!tgt->layers[i].b || !tgt->layers[i].out)
-            return 0;
-    }
-    return 1;
-}
-
-int forward_q(QNetwork *net, float *input, float *q_out) {
+int network_forward(Network *net, float *input, float *out) {
     const float *curr_in = input;
     for (int l = 0; l < net->num_layers; l++) {
         forward_dense_layer(curr_in, net->layers[l].out, &net->layers[l]);
         curr_in = net->layers[l].out;
     }
-    if (q_out)
-        memcpy(q_out, curr_in,
+    if (out)
+        memcpy(out, curr_in,
                net->layers[net->num_layers - 1].out_dim * sizeof(float));
     return 1;
 }
 
-int forward_target(TargetNetwork *tgt, float *input, float *q_out) {
-    const float *curr_in = input;
-    for (int l = 0; l < tgt->num_layers; l++) {
-        forward_target_layer(curr_in, tgt->layers[l].out, &tgt->layers[l]);
-        curr_in = tgt->layers[l].out;
-    }
-    if (q_out)
-        memcpy(q_out, curr_in,
-               tgt->layers[tgt->num_layers - 1].out_dim * sizeof(float));
-    return 1;
-}
-
-void dqn_backward(QNetwork *net, float *input, uint32_t action,
-                  float td_error) {
-    // Sparse output gradient: only position 'action' is non-zero
-    static float delta_out[N_ACTIONS];
-    static float *delta_buf = NULL;
+// Shared backprop engine: accumulates dW/db and propagates delta backward.
+static void backward_from_delta(Network *net, float *input, float *delta_out) {
+    static float   *delta_buf = NULL;
     static uint32_t delta_cap = 0;
-
-    int out_dim_last = net->layers[net->num_layers - 1].out_dim;
-    for (int i = 0; i < out_dim_last; i++)
-        delta_out[i] = 0.0f;
-    delta_out[action] = td_error;
 
     float *delta = delta_out;
 
     for (int l = net->num_layers - 1; l >= 0; --l) {
-        DenseLayer *ly       = &net->layers[l];
-        const int   in_dim   = ly->in_dim;
-        const int   out_dim  = ly->out_dim;
-        const float *inp     = (l == 0) ? input : net->layers[l - 1].out;
+        DenseLayer *ly      = &net->layers[l];
+        const int   in_dim  = ly->in_dim;
+        const int   out_dim = ly->out_dim;
+        const float *inp    = (l == 0) ? input : net->layers[l - 1].out;
 
-        // Accumulate gradients for this layer
         float *restrict db = ly->db;
         for (int i = 0; i < out_dim; ++i) {
             float di = delta[i];
@@ -190,7 +128,6 @@ void dqn_backward(QNetwork *net, float *input, uint32_t action,
                 dw_row[j] += di * inp[j];
         }
 
-        // Propagate delta to the layer below (not needed at input layer)
         if (l > 0) {
             if ((uint32_t)in_dim > delta_cap) {
                 free(delta_buf);
@@ -199,11 +136,11 @@ void dqn_backward(QNetwork *net, float *input, uint32_t action,
                 if (!delta_buf) return;
             }
 
-            const float    *h_prev = net->layers[l - 1].out;
-            ActivationType  act    = net->layers[l - 1].activation;
+            const float   *h_prev = net->layers[l - 1].out;
+            ActivationType act    = net->layers[l - 1].activation;
 
             for (int j = 0; j < in_dim; ++j) {
-                float acc = 0.0f;
+                float acc = 0.f;
                 for (int i = 0; i < out_dim; ++i)
                     acc += delta[i] * ly->W[i][j];
                 float hp = h_prev[j];
@@ -219,18 +156,40 @@ void dqn_backward(QNetwork *net, float *input, uint32_t action,
     }
 }
 
-void copy_weights_to_target(QNetwork *src, TargetNetwork *dst) {
-    for (int l = 0; l < src->num_layers; l++) {
-        DenseLayer  *sl = &src->layers[l];
-        TargetLayer *tl = &dst->layers[l];
-        tl->activation  = sl->activation;
-        for (int i = 0; i < sl->out_dim; i++)
-            memcpy(tl->W[i], sl->W[i], sl->in_dim * sizeof(float));
-        memcpy(tl->b, sl->b, sl->out_dim * sizeof(float));
+// Actor backward — clipped surrogate + entropy gradient w.r.t. logits.
+void actor_backward(Network *actor, float *obs, uint32_t action,
+                    float advantage, float ratio, float clip_eps,
+                    float entropy_coef) {
+    int    last   = actor->num_layers - 1;
+    int    n_acts = actor->layers[last].out_dim;
+    float *probs  = actor->layers[last].out;
+
+    int clipped = (advantage >= 0.f && ratio > 1.f + clip_eps) ||
+                  (advantage <  0.f && ratio < 1.f - clip_eps);
+    float w = clipped ? 0.f : ratio * advantage;
+
+    float H = 0.f;
+    for (int i = 0; i < n_acts; i++)
+        H -= probs[i] * logf(probs[i]);
+
+    static float delta_out[N_ACTIONS];
+    for (int k = 0; k < n_acts; k++) {
+        float ind          = (k == (int)action) ? 1.f : 0.f;
+        float policy_grad  = -w * (ind - probs[k]);
+        float entropy_grad = entropy_coef * probs[k] * (logf(probs[k]) + H);
+        delta_out[k]       = policy_grad + entropy_grad;
     }
+
+    backward_from_delta(actor, obs, delta_out);
 }
 
-void zero_grad_q(QNetwork *net) {
+// Critic backward — MSE value loss.
+void critic_backward(Network *critic, float *obs, float value_target, float coeff) {
+    float delta = coeff * (critic->layers[critic->num_layers - 1].out[0] - value_target);
+    backward_from_delta(critic, obs, &delta);
+}
+
+void network_zero_grad(Network *net) {
     for (int l = 0; l < net->num_layers; l++) {
         DenseLayer *ly = &net->layers[l];
         for (int i = 0; i < ly->out_dim; i++)
@@ -239,7 +198,7 @@ void zero_grad_q(QNetwork *net) {
     }
 }
 
-void gradient_norm_q(QNetwork *net) {
+void network_clip_grad(Network *net) {
     float gnorm_sq = 0.f;
     for (int l = 0; l < net->num_layers; l++) {
         DenseLayer *ly = &net->layers[l];
@@ -264,10 +223,71 @@ void gradient_norm_q(QNetwork *net) {
     }
 }
 
-void adam_optimizer_q(QNetwork *net) {
+void network_adam_update(Network *net, float lr) {
     net->adam_t++;
     float b1t = 1.f - powf(BETA1, (float)net->adam_t);
     float b2t = 1.f - powf(BETA2, (float)net->adam_t);
     for (int l = 0; l < net->num_layers; l++)
-        adam_update_single_layer(&net->layers[l], b1t, b2t);
+        adam_update_single_layer(&net->layers[l], b1t, b2t, lr);
+}
+
+#if USE_CONTINUOUS_ACTION
+
+#define LOG_2PI_C  1.8378770664093453f   // log(2*pi)
+
+void actor_forward_continuous(Network *actor, float *obs, float *action,
+                              float *log_sigma,
+                              float *log_prob_out, float *entropy_out) {
+    int D = N_ACT_DIMS;
+    network_forward(actor, obs, NULL);
+    float *mu = actor->layers[actor->num_layers - 1].out;
+
+    float log_prob = 0.f;
+    float H        = 0.5f * (float)D * (1.f + LOG_2PI_C);
+    for (int i = 0; i < D; i++) {
+        float ls    = log_sigma[i];
+        float diff  = action[i] - mu[i];
+        log_prob += -0.5f * (diff * diff / expf(2.f * ls) + 2.f * ls + LOG_2PI_C);
+        H        += ls;
+    }
+    *log_prob_out = log_prob;
+    *entropy_out  = H;
+}
+
+void actor_backward_continuous(Network *actor, float *obs, float *action,
+                               float *log_sigma,
+                               float advantage, float ratio, float clip_eps) {
+    int    D  = N_ACT_DIMS;
+    float *mu = actor->layers[actor->num_layers - 1].out;
+
+    int clipped = (advantage >= 0.f && ratio > 1.f + clip_eps) ||
+                  (advantage <  0.f && ratio < 1.f - clip_eps);
+    float w = clipped ? 0.f : ratio * advantage;
+
+    static float delta_out[N_ACT_DIMS];
+    for (int i = 0; i < D; i++)
+        delta_out[i] = -w * (action[i] - mu[i]) / expf(2.f * log_sigma[i]);
+    backward_from_delta(actor, obs, delta_out);
+}
+
+#endif  /* USE_CONTINUOUS_ACTION */
+
+// Actor forward — computes softmax probs, log π(a|s), and entropy H[π]
+void actor_forward(Network *actor, float *obs, float *probs_out,
+                   float *log_prob_out, uint32_t action, float *entropy_out) {
+    network_forward(actor, obs, probs_out);
+
+    *log_prob_out = logf(probs_out[action]);
+
+    float H = 0.f;
+    int n = actor->layers[actor->num_layers - 1].out_dim;
+    for (int i = 0; i < n; i++)
+        H -= probs_out[i] * logf(probs_out[i]);
+    *entropy_out = H;
+}
+
+// Critic forward — returns scalar V(s)
+float critic_forward(Network *critic, float *obs) {
+    network_forward(critic, obs, NULL);
+    return critic->layers[critic->num_layers - 1].out[0];
 }

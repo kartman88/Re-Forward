@@ -83,7 +83,7 @@ def main():
         return
 
     # Inizializza Ambiente
-    env = gym.make(ENV_NAME, render_mode="human") #, render_mode="human"
+    env = gym.make(ENV_NAME) #, render_mode="human"
     
     # Setup Grafici (Matplotlib)
     plt.ion()
@@ -119,6 +119,8 @@ def main():
     last_update_time = 0.0
 
     obs, _ = env.reset()
+    if USE_CONTINUOUS_ACTIONS:
+        obs[2] /= 8
 
     try:
         while True:
@@ -170,7 +172,7 @@ def main():
                 obs, r, terminated, truncated, _ = env.step(action_to_env)
                 #print("REWARD:", r)  # Debug: stampa il reward ricevuto
                 #Divido per 8 l'obs[2] per normalizzare
-                #obs[2] /= 8
+                obs[2] /= 8
                 
                 # LA VERA MAGIA: Ci fidiamo SOLO del microcontrollore!
                 done = mcu_done  

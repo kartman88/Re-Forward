@@ -1,0 +1,136 @@
+#ifndef PPO_H
+#define PPO_H
+
+#include "neural_net.h"
+#include <stdint.h>
+#include <stdlib.h>
+
+// PPO Hyperparameters
+#define PPO_LR_ACTOR      5e-4f
+#define PPO_LR_CRITIC     1e-3f
+#define PPO_GAMMA         0.99f
+#define PPO_LAMBDA        0.95f
+#define PPO_CLIP_EPS      0.2f
+#define PPO_EPOCHS        8
+#define PPO_BATCH_SIZE    64
+#define ROLLOUT_STEPS     2048
+#define PPO_C1            0.5f
+#define PPO_C2            0.01f
+#define PPO_GRAD_CLIP     0.5f
+#define PPO_OBS_DIM       OBS_DIM
+
+// Actor output size: use PPO_ACTOR_OUT_DIM to set the last layer of the actor network.
+#if USE_CONTINUOUS_ACTION
+// Actor outputs only means (mu); std is state-independent and decayed externally.
+#define PPO_ACTOR_OUT_DIM  N_ACT_DIMS
+// Symmetric bound: action values can be clipped to [-ACTION_SCALE, +ACTION_SCALE] by the user.
+#define ACTION_SCALE       2.0f
+// Sigma schedule: starts at PPO_SIGMA_INIT, decreases by PPO_SIGMA_DECAY each ppo_update,
+// never drops below PPO_SIGMA_MIN.
+#define PPO_SIGMA_INIT     1.5f
+#define PPO_SIGMA_MIN      0.1f
+#define PPO_SIGMA_N_STEPS  100000
+#define PPO_SIGMA_DECAY    (logf(PPO_SIGMA_INIT / PPO_SIGMA_MIN) / (float)PPO_SIGMA_N_STEPS)
+
+extern float g_ppo_log_sigma[N_ACT_DIMS];
+void ppo_sigma_init(void);
+void ppo_sigma_decay(void);
+#else
+#define PPO_ACTOR_OUT_DIM  N_ACTIONS
+#define PPO_N_ACTIONS      N_ACTIONS
+#endif
+
+// ── Rollout Buffer ─────────────────────────────────────────────────────────────
+
+typedef struct {
+    float    *states;
+    float    *log_probs_old;
+    float    *values;
+    float    *rewards;
+    float    *advantages;
+    float    *returns;
+#if USE_CONTINUOUS_ACTION
+    float    *actions;
+#else
+    uint32_t *actions;
+#endif
+    uint8_t  *dones;
+    uint32_t  head;
+    uint32_t  size;
+    uint32_t  capacity;
+    uint32_t  obs_dim;
+} RolloutBuffer;
+
+int  rollout_buffer_init(RolloutBuffer *buf, uint32_t T, uint32_t obs_dim);
+#if USE_CONTINUOUS_ACTION
+void rollout_buffer_push(RolloutBuffer *buf, float *obs, float *action,
+                         float reward, uint8_t done, float log_prob, float value);
+#else
+void rollout_buffer_push(RolloutBuffer *buf, float *obs, uint32_t action,
+                         float reward, uint8_t done, float log_prob, float value);
+#endif
+
+void compute_gae(RolloutBuffer *buf, float last_value, float gamma, float lambda);
+void normalize_advantages(RolloutBuffer *buf);
+
+// ── Action sampling ───────────────────────────────────────────────────────────
+
+#if USE_CONTINUOUS_ACTION
+void     actor_sample_action(Network *actor, float *obs, float *action_out,
+                             float *log_prob_out, float *value_out,
+                             Network *critic);
+#else
+uint32_t actor_sample_action(Network *actor, float *obs,
+                              float *log_prob_out, float *value_out,
+                              Network *critic);
+#endif
+
+void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf);
+
+// ── PPOAgent — high-level API ─────────────────────────────────────────────────
+
+#if USE_CONTINUOUS_ACTION
+typedef float (*ppo_reward_fn)(const float *obs, const float *action);
+#else
+typedef float (*ppo_reward_fn)(const float *obs, uint32_t action);
+#endif
+typedef uint8_t (*ppo_done_fn)(uint32_t step_in_ep);
+typedef void    (*ppo_event_fn)(void);
+
+typedef struct {
+    Network       *actor;
+    Network       *critic;
+    RolloutBuffer  buf;
+
+    uint32_t       rollout_step_count;
+    uint32_t       step_in_ep;
+    uint8_t        first_step;
+
+    float          prev_obs[OBS_DIM];
+#if USE_CONTINUOUS_ACTION
+    float          prev_action[N_ACT_DIMS];
+#else
+    uint32_t       prev_action;
+#endif
+    float          prev_log_prob;
+    float          prev_value;
+
+    uint8_t        done;           // set inside ppo_step, readable by caller
+
+    ppo_reward_fn  reward_fn;
+    ppo_done_fn    done_fn;
+    ppo_event_fn   on_train_begin; // optional (NULL = no-op)
+    ppo_event_fn   on_train_end;
+} PPOAgent;
+
+int ppo_agent_init(PPOAgent *agent, Network *actor, Network *critic,
+                   ppo_reward_fn reward_fn, ppo_done_fn done_fn,
+                   ppo_event_fn on_train_begin, ppo_event_fn on_train_end);
+
+#if USE_CONTINUOUS_ACTION
+void     ppo_step(PPOAgent *agent, const float *obs, float *action_out);
+#else
+uint32_t ppo_step_discrete(PPOAgent *agent, const float *obs);
+#endif
+
+#endif

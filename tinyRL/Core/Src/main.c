@@ -22,9 +22,11 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "neural_net.h"
-#include "dqn.h"
+#include "uart.h"
+#include "ppo.h"
 #include "utils.h"
 #include <stdio.h>
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -63,13 +65,33 @@ static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN 0 */
 #define MAX_STEPS_PER_EP  200
 
+#if !USE_CONTINUOUS_ACTION
 static const float PENDULUM_TORQUES[N_ACTIONS] = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
 
-static float evaluate_reward_pendulum(const float *obs, uint32_t act) {
+static float compute_reward(const float *obs, uint32_t act) {
     float theta = atan2f(obs[1], obs[0]);
     float omega = obs[2];
     float u     = PENDULUM_TORQUES[act];
-    return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u);
+    return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u) * 0.1f;
+}
+#else
+static float compute_reward(const float *obs, const float *action) {
+    float theta = atan2f(obs[1], obs[0]);
+    float omega = obs[2] * 8.0f;   // obs[2] arrives pre-normalized (/8) from Python
+    float u     = action[0];
+    return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u) * 0.1f;
+}
+#endif
+
+static uint8_t is_done(uint32_t step_in_ep) {
+    return step_in_ep >= MAX_STEPS_PER_EP;
+}
+
+static void on_train_begin(void) {
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+}
+static void on_train_end(void) {
+    HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 }
 /* USER CODE END 0 */
 
@@ -80,7 +102,8 @@ static float evaluate_reward_pendulum(const float *obs, uint32_t act) {
 int main(void) {
 
   /* USER CODE BEGIN 1 */
-
+  SCB_EnableICache();
+  SCB_EnableDCache();
   /* USER CODE END 1 */
 
   /* MPU Configuration--------------------------------------------------------*/
@@ -110,38 +133,39 @@ int main(void) {
   dwt_init();
   srand(HAL_GetTick());
 
-  QNetwork      online;
-  TargetNetwork target;
-  ReplayBuffer  replay;
+  Network  actor, critic;
+  PPOAgent agent;
 
-  int topology[]        = {OBS_DIM, 64, 64, N_ACTIONS};
-  ActivationType acts[] = {ACT_RELU, ACT_RELU, ACT_NONE};
+#if USE_CONTINUOUS_ACTION
+  int topology_actor[]        = {OBS_DIM, 64, 32, PPO_ACTOR_OUT_DIM};
+  ActivationType acts_actor[] = {ACT_TANH, ACT_TANH, ACT_NONE};
+#else
+  int topology_actor[]        = {OBS_DIM, 64, 64, PPO_ACTOR_OUT_DIM};
+  ActivationType acts_actor[] = {ACT_RELU, ACT_RELU, ACT_SOFTMAX};
+#endif
 
-  int init_ok = init_qnetwork(&online, 4, topology, acts) &&
-                init_target_network(&target, 4, topology) &&
-                replay_buffer_init(&replay, REPLAY_SIZE, OBS_DIM);
+  int topology_critic[]        = {OBS_DIM, 64, 64, 1};
+  ActivationType acts_critic[] = {ACT_RELU, ACT_RELU, ACT_NONE};
+
+  int init_ok = network_init(&actor,  4, topology_actor,  acts_actor)  &&
+                network_init(&critic, 4, topology_critic, acts_critic) &&
+                ppo_agent_init(&agent, &actor, &critic,
+                               compute_reward, is_done,
+                               on_train_begin, on_train_end);
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0,  GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
   if (init_ok) {
-      copy_weights_to_target(&online, &target);
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = ready
   } else {
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);  // LD3 = alloc fail
       while (1);
   }
 
-  float    obs[OBS_DIM];
-  float    prev_obs[OBS_DIM];
-  uint32_t action      = 0;
-  uint32_t step_total  = 0;
-  uint32_t train_step  = 0;
-  uint32_t num_episode = 0;
-  uint32_t step_in_ep  = 0;
-  uint8_t  first_step  = 1;
-  uint8_t  manual_done;
-  float    manual_reward;
-  float    epsilon;
+  float obs[OBS_DIM];
+#if USE_CONTINUOUS_ACTION
+  float action[N_ACT_DIMS];
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -150,40 +174,17 @@ int main(void) {
     if (!uart_recv_floats(&huart3, obs, OBS_DIM, 100))
         continue;
 
-    manual_done   = (step_in_ep >= MAX_STEPS_PER_EP);
-    manual_reward = first_step ? 0.0f
-                               : evaluate_reward_pendulum(obs, action);
+#if USE_CONTINUOUS_ACTION
+    ppo_step(&agent, obs, action);
+    float send_action = action[0];
+    if (send_action >  ACTION_SCALE) send_action =  ACTION_SCALE;
+    if (send_action < -ACTION_SCALE) send_action = -ACTION_SCALE;
+    uart_send_float_action(&huart3, send_action, agent.done, 100);
+#else
+    uint32_t act = ppo_step_discrete(&agent, obs);
+    uart_send_float_action(&huart3, PENDULUM_TORQUES[act], agent.done, 100);
+#endif
 
-    if (!first_step)
-        replay_buffer_push(&replay, prev_obs, action,
-                           manual_reward, obs, manual_done);
-
-    if (replay.size >= REPLAY_MIN) {
-        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
-        dqn_train(&online, &target, &replay, BATCH_SIZE, N_ACTIONS);
-        train_step++;
-        if (train_step % TARGET_UPDATE == 0)
-            copy_weights_to_target(&online, &target);
-        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
-    }
-
-    epsilon = calc_epsilon(step_total);
-    action  = dqn_select_action(&online, obs, epsilon, N_ACTIONS);
-
-    memcpy(prev_obs, obs, OBS_DIM * sizeof(float));
-    first_step = 0;
-
-    uart_send_float_action(&huart3, PENDULUM_TORQUES[action], manual_done, 100);
-
-    if (manual_done) {
-        memset(prev_obs, 0, sizeof(prev_obs));
-        first_step = 1;
-        step_in_ep = 0;
-        num_episode++;
-    } else {
-        step_in_ep++;
-    }
-    step_total++;
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -201,8 +202,8 @@ void SystemClock_Config(void) {
 
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /* VOS1 richiesto per 480 MHz */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+  /* VOS0 richiesto per 480 MHz su STM32H745 (VOS1 max = 400 MHz) */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   /* HSI 64 MHz → PLL1: DIVM=4 (16 MHz), DIVN=60 (960 MHz VCO), DIVP=2 → 480 MHz SYSCLK */
@@ -236,7 +237,7 @@ void SystemClock_Config(void) {
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  /* Flash latency 4 cicli richiesti a 480 MHz VOS1 */
+  /* Flash latency 4 cicli richiesti a 480 MHz VOS0, HCLK=240 MHz */
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) {
     Error_Handler();
   }
@@ -373,7 +374,6 @@ void MPU_Config(void) {
  */
 void Error_Handler(void) {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1) {
   }
@@ -389,9 +389,6 @@ void Error_Handler(void) {
  */
 void assert_failed(uint8_t *file, uint32_t line) {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line
-     number, ex: printf("Wrong parameters value: file %s on line %d\r\n", file,
-     line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

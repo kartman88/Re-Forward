@@ -96,6 +96,6 @@ int dense_init(DenseLayer *layer, int in_dim, int out_dim, ActivationType activa
     layer->vb = malloc(out_dim * sizeof(float));
     if (!layer->b || !layer->db || !layer->mb || !layer->vb || !layer->out) return 0;
 
-    //init_layer_params(layer);
+    init_layer_params(layer);
     return 1;
 }
