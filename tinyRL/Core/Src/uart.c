@@ -23,6 +23,17 @@ int uart_send_float_action(UART_HandleTypeDef *huart, float action_val,
     return HAL_UART_Transmit(huart, pkt, 7, timeout) == HAL_OK ? 1 : 0;
 }
 
+int uart_send_floats_action(UART_HandleTypeDef *huart, const float *actions,
+                            size_t n, uint8_t done, uint32_t timeout) {
+    // packet: [STX][float_0]...[float_{n-1}][done][ETX]
+    uint8_t pkt[2 + 16 * sizeof(float) + 1]; // supports up to 16 action dims
+    pkt[0] = 0x02;
+    memcpy(&pkt[1], actions, n * sizeof(float));
+    pkt[1 + n * sizeof(float)] = done;
+    pkt[2 + n * sizeof(float)] = 0x03;
+    return HAL_UART_Transmit(huart, pkt, 3 + n * sizeof(float), timeout) == HAL_OK ? 1 : 0;
+}
+
 int uart_send_action_discrete(UART_HandleTypeDef *huart, uint32_t action,
                               uint8_t done, uint32_t timeout) {
     uint8_t pkt[4] = {0x02, (uint8_t)(action & 0xFF), done, 0x03};

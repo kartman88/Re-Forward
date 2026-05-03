@@ -63,7 +63,7 @@ static void MX_USART3_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#define MAX_STEPS_PER_EP  200
+#define MAX_STEPS_PER_EP  1000
 
 #if !USE_CONTINUOUS_ACTION
 static const float PENDULUM_TORQUES[N_ACTIONS] = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
@@ -76,15 +76,27 @@ static float compute_reward(const float *obs, uint32_t act) {
 }
 #else
 static float compute_reward(const float *obs, const float *action) {
-    float theta = atan2f(obs[1], obs[0]);
-    float omega = obs[2] * 8.0f;   // obs[2] arrives pre-normalized (/8) from Python
-    float u     = action[0];
-    return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u) * 0.1f;
+    // Hopper-v4: r = healthy_reward + x_velocity - ctrl_cost
+    // healthy_reward = 1.0 solo se il Hopper è sano (obs[0]=z >= 0.7, obs[1]=angle in [-0.2, 0.2])
+    // obs[5] = qvel[0] = forward (x) velocity
+    float healthy = (obs[0] >= 0.7f && obs[1] >= -0.2f && obs[1] <= 0.2f) ? 1.0f : 0.0f;
+    float ctrl_cost = 0.0f;
+    for (int i = 0; i < N_ACT_DIMS; i++)
+        ctrl_cost += action[i] * action[i];
+    return healthy + obs[5] - 1e-3f * ctrl_cost;
 }
 #endif
 
+// Osservazione corrente condivisa con is_done (aggiornata nel loop prima di ppo_step)
+static float s_cur_obs[OBS_DIM];
+
 static uint8_t is_done(uint32_t step_in_ep) {
-    return step_in_ep >= MAX_STEPS_PER_EP;
+    if (step_in_ep >= MAX_STEPS_PER_EP) return 1;
+#if USE_CONTINUOUS_ACTION
+    // Hopper termina se cade (z < 0.7) o il busto si inclina troppo (|angle| > 0.2)
+    if (s_cur_obs[0] < 0.7f || s_cur_obs[1] < -0.2f || s_cur_obs[1] > 0.2f) return 1;
+#endif
+    return 0;
 }
 
 static void on_train_begin(void) {
@@ -137,7 +149,7 @@ int main(void) {
   PPOAgent agent;
 
 #if USE_CONTINUOUS_ACTION
-  int topology_actor[]        = {OBS_DIM, 64, 32, PPO_ACTOR_OUT_DIM};
+  int topology_actor[]        = {OBS_DIM, 64, 64, PPO_ACTOR_OUT_DIM};
   ActivationType acts_actor[] = {ACT_TANH, ACT_TANH, ACT_NONE};
 #else
   int topology_actor[]        = {OBS_DIM, 64, 64, PPO_ACTOR_OUT_DIM};
@@ -175,11 +187,13 @@ int main(void) {
         continue;
 
 #if USE_CONTINUOUS_ACTION
+    memcpy(s_cur_obs, obs, OBS_DIM * sizeof(float));
     ppo_step(&agent, obs, action);
-    float send_action = action[0];
-    if (send_action >  ACTION_SCALE) send_action =  ACTION_SCALE;
-    if (send_action < -ACTION_SCALE) send_action = -ACTION_SCALE;
-    uart_send_float_action(&huart3, send_action, agent.done, 100);
+    for (int i = 0; i < N_ACT_DIMS; i++) {
+        if (action[i] >  ACTION_SCALE) action[i] =  ACTION_SCALE;
+        if (action[i] < -ACTION_SCALE) action[i] = -ACTION_SCALE;
+    }
+    uart_send_floats_action(&huart3, action, N_ACT_DIMS, agent.done, 100);
 #else
     uint32_t act = ppo_step_discrete(&agent, obs);
     uart_send_float_action(&huart3, PENDULUM_TORQUES[act], agent.done, 100);

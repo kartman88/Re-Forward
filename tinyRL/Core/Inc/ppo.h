@@ -24,7 +24,7 @@
 // Actor outputs only means (mu); std is state-independent and decayed externally.
 #define PPO_ACTOR_OUT_DIM  N_ACT_DIMS
 // Symmetric bound: action values can be clipped to [-ACTION_SCALE, +ACTION_SCALE] by the user.
-#define ACTION_SCALE       2.0f
+#define ACTION_SCALE       1.0f
 // Sigma schedule: starts at PPO_SIGMA_INIT, decreases by PPO_SIGMA_DECAY each ppo_update,
 // never drops below PPO_SIGMA_MIN.
 #define PPO_SIGMA_INIT     1.5f

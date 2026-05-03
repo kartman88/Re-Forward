@@ -8,14 +8,14 @@
 // 0 = discrete (categorical softmax)
 // 1 = continuous (diagonal Gaussian, state-independent std); actor outputs only mu_0..mu_{D-1}
 #define USE_CONTINUOUS_ACTION   1
-#define N_ACT_DIMS              1     // continuous: number of independent action dims
+#define N_ACT_DIMS              3     // continuous: number of independent action dims (Hopper: hip, knee, ankle)
 
 // ── Network / optimizer constants ──────────────────────────────────────────────
 #define BETA1           0.9f
 #define BETA2           0.999f
 #define EPS_ADAM        1e-8f
-#define N_ACTIONS       5       // {-2, -1, 0, +1, +2} Nm  (discrete mode only)
-#define OBS_DIM         3       // [cos_theta, sin_theta, theta_dot]
+#define N_ACTIONS       5       // discrete mode only (unused for Hopper)
+#define OBS_DIM         11      // Hopper-v4: [z, torso_angle, thigh, leg, foot, vx, vz, v_torso, v_thigh, v_leg, v_foot]
 
 typedef struct {
     DenseLayer *layers;

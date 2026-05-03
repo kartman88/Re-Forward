@@ -8,39 +8,43 @@ import matplotlib.pyplot as plt
 from collections import deque
 
 # ------------------------------------------------------------
-#  CONFIGURAZIONE
+#  CONFIGURAZIONE SERIALE
 # ------------------------------------------------------------
-PORT            = "/dev/ttyACM0"          # Sostituisci con la tua porta
+PORT            = "/dev/ttyACM0"
 BAUDRATE        = 115200
-SER_TIMEOUT_S   = 0.05            # Timeout velocissimo per la read della seriale
-SEND_PERIOD_MS  = 30              # Pausa per evitare busy-loop (30 ms)
-MAX_WAIT_MS     = 100             # Ritrasmette l'osservazione se non arriva risposta
+SER_TIMEOUT_S   = 0.05
+SEND_PERIOD_MS  = 30
+MAX_WAIT_MS     = 100
 
 # --- TOGGLE DISCRETO/CONTINUO ---
-USE_CONTINUOUS_ACTIONS = True     # Metti a False per tornare al CartPole Discreto!
+USE_CONTINUOUS_ACTIONS = True     # False = azione discreta (es. CartPole)
+
+# ------------------------------------------------------------
+#  CONFIGURAZIONE TASK  ← modifica solo qui quando cambi task
+# ------------------------------------------------------------
+ENV_NAME        = "Hopper-v4"    # Nome ambiente Gymnasium
+OBS_DIM         = 11             # Dimensione spazio osservazione
+ACTION_DIM      = 3              # Continuo: n. dims  |  Discreto: n. classi
+ACTION_RANGE    = (-1.0, 1.0)    # (low, high) di ogni azione — usato nei plot
+ENV_KWARGS      = {"terminate_when_unhealthy": False, "render_mode": "human"}  # kwargs extra per gym.make
 
 # Parametri Grafici
 PLOT_EVERY_N_EPISODES = 5
 CONSOLE_LINES = 5
 
 # ------------------------------------------------------------
-#  DIMENSIONI TASK
+#  STRUCT SERIALI (auto-calcolate, non toccare)
 # ------------------------------------------------------------
-ENV_NAME        = "Pendulum-v1" if USE_CONTINUOUS_ACTIONS else "CartPole-v1"
-OBS_DIM         = 3 if USE_CONTINUOUS_ACTIONS else 4  # Aggiorna in base all'ambiente!
-
 _STATE_STRUCT   = f"<{OBS_DIM}f"
 
-# Calcolo automatico della dimensione del frame in base alla tipologia di azione
 if USE_CONTINUOUS_ACTIONS:
-    ACTION_DIM = 1  # <-- Metti il numero di azioni (es. 2 per un braccio)
     ACTION_BYTE_SIZE = 4 * ACTION_DIM
-    _ACTION_STRUCT = f"<{ACTION_DIM}f"   # N float little-endian
+    _ACTION_STRUCT   = f"<{ACTION_DIM}f"   # N float little-endian
 else:
-    ACTION_BYTE_SIZE = 1   # L'azione è un intero discreto (1 byte)
-    _ACTION_STRUCT = "<B"  # Little-endian unsigned char (uint8)
+    ACTION_BYTE_SIZE = 1
+    _ACTION_STRUCT   = "<B"                # uint8 per azione discreta
 
-_ACTION_FRAME_LEN = 1 + ACTION_BYTE_SIZE + 1 + 1   # 0x02 + action_bytes + done + 0x03
+_ACTION_FRAME_LEN = 1 + ACTION_BYTE_SIZE + 1 + 1   # STX + action_bytes + done + ETX
 
 # ------------------------------------------------------------
 #  FUNZIONI SERIALI
@@ -51,18 +55,20 @@ def send_state(ser: serial.Serial, obs: np.ndarray):
     ser.write(b'\x02' + payload + b'\x03')
 
 def recv_action_done(ser: serial.Serial):
-    """Legge il frame di risposta. Ritorna (azione_decodificata, done) o None se incompleto."""
+    """Legge il frame di risposta. Ritorna (actions, done) o None se incompleto.
+    Per azioni continue: actions è un np.ndarray di shape (ACTION_DIM,).
+    Per azioni discrete: actions è un int.
+    """
     frame = ser.read(_ACTION_FRAME_LEN)
     if len(frame) == _ACTION_FRAME_LEN and frame[0] == 0x02 and frame[-1] == 0x03:
-        
-        # Estrae i byte dell'azione e li spacchetta nel tipo corretto (float o int)
         action_bytes = frame[1:1 + ACTION_BYTE_SIZE]
-        action_val = struct.unpack(_ACTION_STRUCT, action_bytes)[0]
-        
-        # Estrae il done flag (penultimo byte)
+        if USE_CONTINUOUS_ACTIONS:
+            # Spacchetta ACTION_DIM float — funziona per qualsiasi N
+            actions = np.array(struct.unpack(_ACTION_STRUCT, action_bytes), dtype=np.float32)
+        else:
+            actions = struct.unpack(_ACTION_STRUCT, action_bytes)[0]  # int discreto
         done_flag = bool(frame[-2])
-        
-        return (action_val, done_flag)
+        return (actions, done_flag)
     return None
 
 def clear_console():
@@ -83,34 +89,37 @@ def main():
         return
 
     # Inizializza Ambiente
-    env = gym.make(ENV_NAME) #, render_mode="human"
+    env = gym.make(ENV_NAME, **ENV_KWARGS)
     
     # Setup Grafici (Matplotlib)
     plt.ion()
-    fig, (ax_reward, ax_action) = plt.subplots(1, 2, figsize=(15, 5))
-    
+    n_plots = 1 + ACTION_DIM
+    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 5))
+    ax_reward  = axes[0]
+    ax_actions = list(axes[1:])   # un subplot per ogni dim di azione
+
     # --- Subplot Reward ---
     ax_reward.set_title(f"Training PPO su STM32 - {ENV_NAME}")
     ax_reward.set_xlabel("Episodi")
     ax_reward.set_ylabel("Reward")
-    
+
     reward_history = []
     moving_avg_history = []
     moving_avg_queue = deque(maxlen=20)
     console_history = deque(maxlen=CONSOLE_LINES)
-    all_actions = []  # Raccoglie tutte le azioni
-    
+    all_actions = [[] for _ in range(ACTION_DIM)]  # Una lista per ogni dim di azione
+
     line_raw, = ax_reward.plot([], [], 'b-', alpha=0.3, label='Reward Grezzo')
     line_avg, = ax_reward.plot([], [], 'r-', linewidth=2, label='Media Mobile (20 ep)')
     ax_reward.legend()
-    
-    # --- Subplot Action Distribution ---
-    ax_action.set_title("Distribuzione Azioni")
-    ax_action.set_xlabel("Valore Azione")
-    ax_action.set_ylabel("Frequenza")
-    if USE_CONTINUOUS_ACTIONS:
-        ax_action.set_xlim(-2.0, 2.0)  # Tipico range per Pendulum
-    hist_patches = ax_action.patches
+
+    # --- Subplots Azioni (uno per dim) ---
+    for i, ax in enumerate(ax_actions):
+        ax.set_title(f"Azione a{i}")
+        ax.set_xlabel("Valore")
+        ax.set_ylabel("Frequenza")
+        if USE_CONTINUOUS_ACTIONS:
+            ax.set_xlim(*ACTION_RANGE)
 
     # Variabili di stato
     episode_count = 0
@@ -119,8 +128,6 @@ def main():
     last_update_time = 0.0
 
     obs, _ = env.reset()
-    if USE_CONTINUOUS_ACTIONS:
-        obs[2] /= 8
 
     try:
         while True:
@@ -150,32 +157,33 @@ def main():
                     continue
 
                 # ---- FRAME VALIDO RICEVUTO ----
-                action_val, mcu_done = pkt
-                state_sent = False 
-                all_actions.append(action_val)  # Raccogli l'azione
-                
+                actions, mcu_done = pkt
+                state_sent = False
+
+                # Raccogli azioni per dim (per i plot)
+                if USE_CONTINUOUS_ACTIONS:
+                    for i, a in enumerate(actions):
+                        all_actions[i].append(float(a))
+                else:
+                    all_actions[0].append(actions)
+
                 # 3. Controllo se il micro ha appena fatto training
                 wait_time = time.time() - action_wait_start
-                if wait_time > 0.5: 
+                if wait_time > 0.5:
                     update_count += 1
                     last_update_time = wait_time
 
-                # 4. Formattazione dell'Azione per Gymnasium
-                if USE_CONTINUOUS_ACTIONS:
-                    # Gli ambienti continui richiedono un array numpy
-                    action_to_env = np.array([action_val], dtype=np.float32)
-                else:
-                    # Gli ambienti discreti richiedono un intero
-                    action_to_env = int(action_val)
-                
-                # Step nell'ambiente fisico
-                obs, r, terminated, truncated, _ = env.step(action_to_env)
-                #print("REWARD:", r)  # Debug: stampa il reward ricevuto
-                #Divido per 8 l'obs[2] per normalizzare
-                obs[2] /= 8
-                
-                # LA VERA MAGIA: Ci fidiamo SOLO del microcontrollore!
-                done = mcu_done  
+                # 4. Step nell'ambiente fisico
+                # actions è già un np.ndarray (continuo) o int (discreto) — pronto per gym
+                obs, r, terminated, truncated, _ = env.step(actions)
+
+                # Se gym termina prima del micro (es. caduta Hopper), resettiamo
+                # l'env internamente e inviamo il nuovo obs al micro come passo successivo.
+                # Il done è comandato SOLO dal microcontrollore.
+                if terminated or truncated:
+                    obs, _ = env.reset()
+
+                done = mcu_done
                 
                 current_ep_reward += r
                 global_step += 1
@@ -222,16 +230,19 @@ def main():
                 ax_reward.relim()
                 ax_reward.autoscale_view()
                 
-                # Aggiorna l'istogramma delle azioni
-                ax_action.clear()
-                ax_action.set_title("Distribuzione Azioni")
-                ax_action.set_xlabel("Valore Azione")
-                ax_action.set_ylabel("Frequenza")
-                if USE_CONTINUOUS_ACTIONS:
-                    ax_action.hist(all_actions, bins=30, color='green', alpha=0.7, edgecolor='black')
-                    ax_action.set_xlim(-2.0, 2.0)
-                else:
-                    ax_action.hist(all_actions, bins=range(0, 5), color='green', alpha=0.7, edgecolor='black')
+                # Aggiorna un istogramma per ogni dim di azione
+                for i, ax in enumerate(ax_actions):
+                    ax.clear()
+                    ax.set_title(f"Azione a{i}")
+                    ax.set_xlabel("Valore")
+                    ax.set_ylabel("Frequenza")
+                    if USE_CONTINUOUS_ACTIONS:
+                        ax.hist(all_actions[i], bins=30, color='green',
+                                alpha=0.7, edgecolor='black')
+                        ax.set_xlim(*ACTION_RANGE)
+                    else:
+                        ax.hist(all_actions[0], bins=range(0, ACTION_DIM + 1),
+                                color='green', alpha=0.7, edgecolor='black')
                 
                 fig.canvas.draw()
                 fig.canvas.flush_events()
