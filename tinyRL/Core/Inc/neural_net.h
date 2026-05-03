@@ -3,7 +3,9 @@
 #include "dense_layer.h"
 
 //Change this to decide which type of action you use
-#define USE_CONTINUOUS_ACTIONS 1
+#define USE_CONTINUOUS_ACTIONS 0
+
+#define DEBUG 1   // 1 = abilita dump dati per debug, 0 = nessun overhead
 
 #if USE_CONTINUOUS_ACTIONS
 	typedef float action_t;

@@ -45,6 +45,12 @@ uint8_t done_check(float *state, uint32_t step);
 //reward function
 float evaluate_reward(float *state);
 
+#if DEBUG
+int uart_send_weights(UART_HandleTypeDef *huart, NeuralNet *net, uint32_t timeout);
+int uart_send_debug_batch(UART_HandleTypeDef *huart, Buffer *buf, NeuralNet *net,
+                          uint32_t step_count, uint32_t obs_dim, uint32_t timeout);
+#endif
+
 
 
 #endif

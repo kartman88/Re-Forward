@@ -100,7 +100,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 
   srand(HAL_GetTick() ^ 0xA5A5A5A5);
-  int input_size = 3;
+  int input_size = 4;
   int buffer_size = MAX_STEPS;
 
 #if USE_CONTINUOUS_ACTIONS
@@ -116,7 +116,7 @@ int main(void)
 
   //create neural network
   NeuralNet net;
-  int num_layers = 3; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
+  int num_layers = 2; //SOSTITUIRE IN MODO PIÙ AUTOMATICO
   init_network(&net, num_layers, net_topology, activations);
 
   Buffer buffer;
@@ -140,7 +140,15 @@ int main(void)
 			uart_send_action(&huart2, action, done, 50);
 		}
 		if(done){ //finish episode
-			if(train == 1) finish_episode(&buffer, &net, step_count);
+			if(train == 1){
+#if DEBUG
+				if(num_episode == 0) uart_send_weights(&huart2, &net, 5000);
+#endif
+				finish_episode(&buffer, &net, step_count);
+#if DEBUG
+				if(num_episode == 0) uart_send_debug_batch(&huart2, &buffer, &net, step_count, input_size, 5000);
+#endif
+			}
 			//dt_ms = HAL_GetTick() - t0;
 			//uart_send_log(&huart2, dt_ms, step_count, 50);
 			//reset step counter and increase num of episode completed

@@ -1,6 +1,12 @@
 #include "reinforce.h"
 #include "utils.h"
 
+#if DEBUG
+static float _dbg_raw_returns[MAX_STEPS];
+static float _dbg_logits[MAX_STEPS * 2];
+static float _dbg_loss;
+#endif
+
 //CARTPOLE
 #define CART_LIMIT 2.4f                 /* ±2.4 m */
 #define POLE_LIMIT 0.20943951f          /* ±12°   */
@@ -210,6 +216,10 @@ uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
 		G = r + 0.99f * G;
 		adv_buf[t] = G;
 	}
+#if DEBUG
+	memcpy(_dbg_raw_returns, adv_buf, step_count * sizeof(float));
+	_dbg_loss = 0.f;
+#endif
 	//adv normalization, REINFORCE with costant baseline
 	float mean = 0.0f;
 	for (int t = 0; t < step_count; ++t) mean += adv_buf[t];
@@ -229,6 +239,22 @@ uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
 
 		forward(net, state, NULL);
 
+#if DEBUG
+		{
+			DenseLayer *last_l = &net->layers[net->num_layers - 1];
+			DenseLayer *prev_l = &net->layers[net->num_layers - 2];
+			uint32_t od = (uint32_t)last_l->out_dim;
+			for(int i = 0; i < (int)od; i++){
+				float acc = last_l->b[i];
+				for(int j = 0; j < last_l->in_dim; j++)
+					acc += last_l->W[i][j] * prev_l->out[j];
+				_dbg_logits[(uint32_t)t * od + i] = acc;
+			}
+			float pi_a = fmaxf(last_l->out[(int)buf->action_buffer[t]], 1e-7f);
+			_dbg_loss += -logf(pi_a) * _dbg_raw_returns[t];
+		}
+#endif
+
 		float adv = adv_buf[t];
 		action_t a = buf->action_buffer[t];
 
@@ -237,6 +263,9 @@ uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
 
 	}
 
+#if DEBUG
+	_dbg_loss /= (float)step_count;
+#endif
 	//Normalize gradient
 	gradient_norm(net, step_count);
 
@@ -349,4 +378,46 @@ float evaluate_reward(float *state, uint32_t step){
 	return reward;
 }
 */
+
+#if DEBUG
+int uart_send_weights(UART_HandleTypeDef *huart, NeuralNet *net, uint32_t timeout){
+	uint32_t n = 0;
+	for(int l = 0; l < net->num_layers; l++)
+		n += (uint32_t)(net->layers[l].out_dim * net->layers[l].in_dim + net->layers[l].out_dim);
+
+	uint8_t hdr[5] = {0x05, (uint8_t)n, (uint8_t)(n>>8), (uint8_t)(n>>16), (uint8_t)(n>>24)};
+	HAL_UART_Transmit(huart, hdr, 5, timeout);
+
+	for(int l = 0; l < net->num_layers; l++){
+		DenseLayer *ly = &net->layers[l];
+		for(int i = 0; i < ly->out_dim; i++)
+			HAL_UART_Transmit(huart, (uint8_t*)ly->W[i], (uint16_t)(ly->in_dim * sizeof(float)), timeout);
+		HAL_UART_Transmit(huart, (uint8_t*)ly->b, (uint16_t)(ly->out_dim * sizeof(float)), timeout);
+	}
+	uint8_t etx = 0x06;
+	return (HAL_UART_Transmit(huart, &etx, 1, timeout) == HAL_OK);
+}
+
+int uart_send_debug_batch(UART_HandleTypeDef *huart, Buffer *buf, NeuralNet *net,
+                          uint32_t step_count, uint32_t obs_dim, uint32_t timeout){
+	uint32_t od = (uint32_t)net->layers[net->num_layers-1].out_dim;
+	uint8_t hdr[9] = {
+		0x07,
+		(uint8_t)step_count, (uint8_t)(step_count>>8), (uint8_t)(step_count>>16), (uint8_t)(step_count>>24),
+		(uint8_t)od,         (uint8_t)(od>>8),         (uint8_t)(od>>16),         (uint8_t)(od>>24)
+	};
+	HAL_UART_Transmit(huart, hdr, 9, timeout);
+
+	for(uint32_t t = 0; t < step_count; t++)
+		HAL_UART_Transmit(huart, (uint8_t*)buf->state_buffer[t], (uint16_t)(obs_dim * sizeof(float)), timeout);
+
+	HAL_UART_Transmit(huart, (uint8_t*)_dbg_raw_returns,      (uint16_t)(step_count * sizeof(float)), timeout);
+	HAL_UART_Transmit(huart, (uint8_t*)buf->advantage_buffer, (uint16_t)(step_count * sizeof(float)), timeout);
+	HAL_UART_Transmit(huart, (uint8_t*)_dbg_logits,           (uint16_t)(step_count * od * sizeof(float)), timeout);
+	HAL_UART_Transmit(huart, (uint8_t*)&_dbg_loss,            sizeof(float), timeout);
+
+	uint8_t etx = 0x08;
+	return (HAL_UART_Transmit(huart, &etx, 1, timeout) == HAL_OK);
+}
+#endif
 

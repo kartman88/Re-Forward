@@ -17,7 +17,11 @@ SEND_PERIOD_MS  = 30              # Pausa per evitare busy-loop (30 ms)
 MAX_WAIT_MS     = 100             # Ritrasmette l'osservazione se non arriva risposta
 
 # --- TOGGLE DISCRETO/CONTINUO ---
-USE_CONTINUOUS_ACTIONS = True     # Metti a False per tornare al CartPole Discreto!
+USE_CONTINUOUS_ACTIONS = False    # Metti a False per tornare al CartPole Discreto!
+
+# --- DEBUG DATA DUMP ---
+DEBUG_MODE   = True               # Riceve e salva i dati di debug dal micro dopo il 1° episodio
+NET_TOPOLOGY = [4, 64, 2]         # Deve corrispondere alla topologia in main.c
 
 # Parametri Grafici
 PLOT_EVERY_N_EPISODES = 5
@@ -63,6 +67,43 @@ def recv_action_done(ser: serial.Serial):
         
         return (action_val, done_flag)
     return None
+
+def recv_initial_weights(ser, topology):
+    """Legge frame 0x05...0x06, ricostruisce i pesi layer by layer."""
+    old_to = ser.timeout
+    ser.timeout = 6.0
+    while ser.read(1) != b'\x05':
+        pass
+    n_floats = struct.unpack('<I', ser.read(4))[0]
+    data = np.frombuffer(ser.read(n_floats * 4), dtype=np.float32)
+    ser.read(1)  # ETX 0x06
+    ser.timeout = old_to
+    result, idx = {}, 0
+    for l in range(len(topology) - 1):
+        in_d, out_d = topology[l], topology[l + 1]
+        result[f'W{l}'] = data[idx:idx + out_d * in_d].reshape(out_d, in_d).copy()
+        idx += out_d * in_d
+        result[f'b{l}'] = data[idx:idx + out_d].copy()
+        idx += out_d
+    return result
+
+def recv_debug_batch(ser, obs_dim):
+    """Legge frame 0x07...0x08 con stati, returns, advantages, logits e loss."""
+    old_to = ser.timeout
+    ser.timeout = 6.0
+    while ser.read(1) != b'\x07':
+        pass
+    step_count = struct.unpack('<I', ser.read(4))[0]
+    out_dim    = struct.unpack('<I', ser.read(4))[0]
+    states   = np.frombuffer(ser.read(step_count * obs_dim * 4), dtype=np.float32).reshape(step_count, obs_dim).copy()
+    returns  = np.frombuffer(ser.read(step_count * 4), dtype=np.float32).copy()
+    adv_norm = np.frombuffer(ser.read(step_count * 4), dtype=np.float32).copy()
+    logits   = np.frombuffer(ser.read(step_count * out_dim * 4), dtype=np.float32).reshape(step_count, out_dim).copy()
+    loss     = struct.unpack('<f', ser.read(4))[0]
+    ser.read(1)  # ETX 0x08
+    ser.timeout = old_to
+    return {'states': states, 'raw_returns': returns,
+            'norm_advantages': adv_norm, 'logits': logits, 'loss': loss}
 
 def clear_console():
     """Pulisce il terminale"""
@@ -190,6 +231,14 @@ def main():
             for line in console_history:
                 print(line)
             print("============================================================")
+
+            # Ricezione debug data dopo il primo episodio
+            if DEBUG_MODE and episode_count == 1:
+                print("[PC] Ricezione debug data dal micro...")
+                weights = recv_initial_weights(ser, NET_TOPOLOGY)
+                batch   = recv_debug_batch(ser, OBS_DIM)
+                np.savez('debug_data.npz', **weights, **batch)
+                print(f"[PC] debug_data.npz salvato  |  steps={batch['states'].shape[0]}  loss={batch['loss']:.4f}")
 
             # Resetta ambiente per il nuovo episodio
             obs, _ = env.reset()
