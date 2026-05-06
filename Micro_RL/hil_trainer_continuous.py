@@ -22,9 +22,9 @@ USE_CONTINUOUS_ACTIONS = True     # False = azione discreta (es. CartPole)
 # ------------------------------------------------------------
 #  CONFIGURAZIONE TASK  ← modifica solo qui quando cambi task
 # ------------------------------------------------------------
-ENV_NAME        = "Hopper-v4"    # Nome ambiente Gymnasium
-OBS_DIM         = 11             # Dimensione spazio osservazione
-ACTION_DIM      = 3              # Continuo: n. dims  |  Discreto: n. classi
+ENV_NAME        = "Walker2d-v4"    # Nome ambiente Gymnasium
+OBS_DIM         = 17             # Dimensione spazio osservazione
+ACTION_DIM      = 6              # Continuo: n. dims  |  Discreto: n. classi
 ACTION_RANGE    = (-1.0, 1.0)    # (low, high) di ogni azione — usato nei plot
 ENV_KWARGS      = {"terminate_when_unhealthy": False, "render_mode": "human"}  # kwargs extra per gym.make
 

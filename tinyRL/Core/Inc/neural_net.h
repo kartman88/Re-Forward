@@ -8,14 +8,21 @@
 // 0 = discrete (categorical softmax)
 // 1 = continuous (diagonal Gaussian, state-independent std); actor outputs only mu_0..mu_{D-1}
 #define USE_CONTINUOUS_ACTION   1
-#define N_ACT_DIMS              3     // continuous: number of independent action dims (Hopper: hip, knee, ankle)
+
+// ── Tanh squashing (continuous mode only) ──────────────────────────────────────
+// 0 = standard Gaussian (clip externally if needed) — original behaviour
+// 1 = squashed Gaussian: a = tanh(z), log_prob corrected with Jacobian
+//     Actions are bounded in (-1, 1) without any external clipping.
+//     Fixes the boundary-saturation issue at the cost of atanhf() calls in training.
+#define PPO_USE_TANH_SQUASH     1   //1 to enable Tanh squashing of continuous actions
+#define N_ACT_DIMS              6     // continuous: number of independent action dims (Hopper: hip, knee, ankle)
 
 // ── Network / optimizer constants ──────────────────────────────────────────────
 #define BETA1           0.9f
 #define BETA2           0.999f
 #define EPS_ADAM        1e-8f
 #define N_ACTIONS       5       // discrete mode only (unused for Hopper)
-#define OBS_DIM         11      // Hopper-v4: [z, torso_angle, thigh, leg, foot, vx, vz, v_torso, v_thigh, v_leg, v_foot]
+#define OBS_DIM         17      // Hopper-v4: [z, torso_angle, thigh, leg, foot, vx, vz, v_torso, v_thigh, v_leg, v_foot]
 
 typedef struct {
     DenseLayer *layers;

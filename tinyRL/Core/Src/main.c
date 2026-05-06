@@ -76,14 +76,15 @@ static float compute_reward(const float *obs, uint32_t act) {
 }
 #else
 static float compute_reward(const float *obs, const float *action) {
-    // Hopper-v4: r = healthy_reward + x_velocity - ctrl_cost
-    // healthy_reward = 1.0 solo se il Hopper è sano (obs[0]=z >= 0.7, obs[1]=angle in [-0.2, 0.2])
-    // obs[5] = qvel[0] = forward (x) velocity
-    float healthy = (obs[0] >= 0.7f && obs[1] >= -0.2f && obs[1] <= 0.2f) ? 1.0f : 0.0f;
+    // Walker2d-v4: r = healthy_reward + x_velocity - ctrl_cost
+    // healthy_reward = 1.0 se z in [0.8, 2.0] e angle in [-1.0, 1.0]
+    // obs[8] = qvel[0] = forward (x) velocity
+    float healthy = (obs[0] >= 0.8f && obs[0] <= 2.0f &&
+                     obs[1] >= -1.0f && obs[1] <= 1.0f) ? 1.0f : 0.0f;
     float ctrl_cost = 0.0f;
     for (int i = 0; i < N_ACT_DIMS; i++)
         ctrl_cost += action[i] * action[i];
-    return healthy + obs[5] - 1e-3f * ctrl_cost;
+    return healthy + obs[8] - 1e-3f * ctrl_cost;
 }
 #endif
 
@@ -93,8 +94,9 @@ static float s_cur_obs[OBS_DIM];
 static uint8_t is_done(uint32_t step_in_ep) {
     if (step_in_ep >= MAX_STEPS_PER_EP) return 1;
 #if USE_CONTINUOUS_ACTION
-    // Hopper termina se cade (z < 0.7) o il busto si inclina troppo (|angle| > 0.2)
-    if (s_cur_obs[0] < 0.7f || s_cur_obs[1] < -0.2f || s_cur_obs[1] > 0.2f) return 1;
+    // Walker2D termina se cade (z fuori [0.8, 2.0]) o si inclina troppo (|angle| > 1.0)
+    if (s_cur_obs[0] < 0.8f || s_cur_obs[0] > 2.0f ||
+        s_cur_obs[1] < -1.0f || s_cur_obs[1] > 1.0f) return 1;
 #endif
     return 0;
 }

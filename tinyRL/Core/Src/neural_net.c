@@ -245,10 +245,20 @@ void actor_forward_continuous(Network *actor, float *obs, float *action,
     float log_prob = 0.f;
     float H        = 0.5f * (float)D * (1.f + LOG_2PI_C);
     for (int i = 0; i < D; i++) {
-        float ls    = log_sigma[i];
+        float ls = log_sigma[i];
+        H += ls;
+#if PPO_USE_TANH_SQUASH
+        // action[i] = tanh(z); recover z = atanh(action[i]) to evaluate Gaussian log_prob,
+        // then subtract the log-abs-Jacobian: log(1 - tanh²(z)) = log(1 - a²).
+        float a    = fmaxf(fminf(action[i], 1.f - 1e-6f), -1.f + 1e-6f);
+        float z    = atanhf(a);
+        float diff = z - mu[i];
+        log_prob += -0.5f * (diff * diff / expf(2.f * ls) + 2.f * ls + LOG_2PI_C)
+                    - logf(1.f - a * a + 1e-6f);
+#else
         float diff  = action[i] - mu[i];
         log_prob += -0.5f * (diff * diff / expf(2.f * ls) + 2.f * ls + LOG_2PI_C);
-        H        += ls;
+#endif
     }
     *log_prob_out = log_prob;
     *entropy_out  = H;
@@ -265,8 +275,17 @@ void actor_backward_continuous(Network *actor, float *obs, float *action,
     float w = clipped ? 0.f : ratio * advantage;
 
     static float delta_out[N_ACT_DIMS];
-    for (int i = 0; i < D; i++)
+    for (int i = 0; i < D; i++) {
+#if PPO_USE_TANH_SQUASH
+        // action[i] = tanh(z); gradient of log π w.r.t. mu_i is (z - mu_i)/sigma_i²,
+        // same form as the Gaussian case but with z = atanh(a) in place of the raw action.
+        float a = fmaxf(fminf(action[i], 1.f - 1e-6f), -1.f + 1e-6f);
+        float z = atanhf(a);
+        delta_out[i] = -w * (z - mu[i]) / expf(2.f * log_sigma[i]);
+#else
         delta_out[i] = -w * (action[i] - mu[i]) / expf(2.f * log_sigma[i]);
+#endif
+    }
     backward_from_delta(actor, obs, delta_out);
 }
 

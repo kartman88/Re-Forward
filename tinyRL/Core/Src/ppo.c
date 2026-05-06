@@ -134,10 +134,18 @@ void actor_sample_action(Network *actor, float *obs, float *action_out,
 
     float log_prob = 0.f;
     for (int i = 0; i < N_ACT_DIMS; i++) {
-        float ls      = g_ppo_log_sigma[i];
-        float eps     = randn();
-        action_out[i] = mu[i] + expf(ls) * eps;
+        float ls  = g_ppo_log_sigma[i];
+        float eps = randn();
+        float z   = mu[i] + expf(ls) * eps;
+#if PPO_USE_TANH_SQUASH
+        float a       = tanhf(z);
+        action_out[i] = a;
+        log_prob += -0.5f * (eps * eps + 2.f * ls + LOG_2PI_PPO)
+                    - logf(1.f - a * a + 1e-6f);
+#else
+        action_out[i] = z;
         log_prob += -0.5f * (eps * eps + 2.f * ls + LOG_2PI_PPO);
+#endif
     }
     *log_prob_out = log_prob;
 

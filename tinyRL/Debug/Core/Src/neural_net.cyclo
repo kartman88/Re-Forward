@@ -8,6 +8,6 @@
 ../Core/Src/neural_net.c:201:6:network_clip_grad	15
 ../Core/Src/neural_net.c:226:6:network_adam_update	8
 ../Core/Src/neural_net.c:238:6:actor_forward_continuous	1
-../Core/Src/neural_net.c:257:6:actor_backward_continuous	4
-../Core/Src/neural_net.c:276:6:actor_forward	3
-../Core/Src/neural_net.c:290:7:critic_forward	1
+../Core/Src/neural_net.c:267:6:actor_backward_continuous	4
+../Core/Src/neural_net.c:295:6:actor_forward	3
+../Core/Src/neural_net.c:309:7:critic_forward	1

@@ -29,7 +29,7 @@
 // never drops below PPO_SIGMA_MIN.
 #define PPO_SIGMA_INIT     1.5f
 #define PPO_SIGMA_MIN      0.1f
-#define PPO_SIGMA_N_STEPS  100000
+#define PPO_SIGMA_N_STEPS  500000
 #define PPO_SIGMA_DECAY    (logf(PPO_SIGMA_INIT / PPO_SIGMA_MIN) / (float)PPO_SIGMA_N_STEPS)
 
 extern float g_ppo_log_sigma[N_ACT_DIMS];

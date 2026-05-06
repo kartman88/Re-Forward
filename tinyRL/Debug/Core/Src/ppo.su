@@ -4,7 +4,7 @@
 ../Core/Src/ppo.c:81:6:normalize_advantages	4	static
 ../Core/Src/ppo.c:107:6:ppo_sigma_init	0	static
 ../Core/Src/ppo.c:113:6:ppo_sigma_decay	0	static
-../Core/Src/ppo.c:129:6:actor_sample_action	64	static
-../Core/Src/ppo.c:176:6:ppo_update	120	static
-../Core/Src/ppo.c:259:5:ppo_agent_init	16	static
-../Core/Src/ppo.c:296:6:ppo_step	80	static
+../Core/Src/ppo.c:129:6:actor_sample_action	72	static
+../Core/Src/ppo.c:184:6:ppo_update	120	static
+../Core/Src/ppo.c:267:5:ppo_agent_init	16	static
+../Core/Src/ppo.c:304:6:ppo_step	88	static
