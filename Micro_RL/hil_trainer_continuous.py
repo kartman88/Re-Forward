@@ -237,8 +237,9 @@ def main():
                 print("[PC] Ricezione debug data dal micro...")
                 weights = recv_initial_weights(ser, NET_TOPOLOGY)
                 batch   = recv_debug_batch(ser, OBS_DIM)
-                np.savez('debug_data.npz', **weights, **batch)
-                print(f"[PC] debug_data.npz salvato  |  steps={batch['states'].shape[0]}  loss={batch['loss']:.4f}")
+                os.makedirs('debug_data', exist_ok=True)
+                np.savez(os.path.join('debug_data', 'debug_data.npz'), **weights, **batch)
+                print(f"[PC] debug_data/debug_data.npz salvato  |  steps={batch['states'].shape[0]}  loss={batch['loss']:.4f}")
 
             # Resetta ambiente per il nuovo episodio
             obs, _ = env.reset()

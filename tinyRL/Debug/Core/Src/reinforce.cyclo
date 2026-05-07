@@ -8,7 +8,7 @@
 ../Core/Src/reinforce.c:159:6:store_step	1
 ../Core/Src/reinforce.c:167:5:step	4
 ../Core/Src/reinforce.c:207:10:finish_episode	10
-../Core/Src/reinforce.c:310:9:done_check	2
-../Core/Src/reinforce.c:320:7:evaluate_reward	1
-../Core/Src/reinforce.c:383:5:uart_send_weights	4
-../Core/Src/reinforce.c:401:5:uart_send_debug_batch	2
+../Core/Src/reinforce.c:296:9:done_check	4
+../Core/Src/reinforce.c:305:7:evaluate_reward	1
+../Core/Src/reinforce.c:384:5:uart_send_weights	4
+../Core/Src/reinforce.c:402:5:uart_send_debug_batch	2

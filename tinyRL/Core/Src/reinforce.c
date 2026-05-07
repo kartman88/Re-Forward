@@ -292,7 +292,7 @@ float evaluate_reward(float *obs){
 }
 */
 
-/*CODE FOR CARTPOLE
+/*CODE FOR CARTPOLE*/
 uint8_t done_check(float *state, uint32_t step){
 	if (fabsf(state[0]) > CART_LIMIT) return 1;      //out of bound
 	if (fabsf(state[2]) > POLE_LIMIT) return 1;      //±12°
@@ -304,9 +304,9 @@ uint8_t done_check(float *state, uint32_t step){
 
 float evaluate_reward(float *state){
 	return 1.f;
-}*/
+}
 
-/*CODE FOR PENDULUM*/
+/*CODE FOR PENDULUM
 uint8_t done_check(float *state, uint32_t step) {
     // Il documento conferma che non ci sono condizioni di "out of bounds".
     // Si tronca solo al raggiungimento dei 200 step.
@@ -339,6 +339,7 @@ float evaluate_reward(float *state) {
 
     return reward;
 }
+*/
 
 
 /*CODE FOR ACROBOT
