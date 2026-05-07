@@ -412,6 +412,8 @@ int uart_send_debug_batch(UART_HandleTypeDef *huart, Buffer *buf, NeuralNet *net
 	for(uint32_t t = 0; t < step_count; t++)
 		HAL_UART_Transmit(huart, (uint8_t*)buf->state_buffer[t], (uint16_t)(obs_dim * sizeof(float)), timeout);
 
+	HAL_UART_Transmit(huart, (uint8_t*)buf->action_buffer, (uint16_t)(step_count * sizeof(action_t)), timeout);
+
 	HAL_UART_Transmit(huart, (uint8_t*)_dbg_raw_returns,      (uint16_t)(step_count * sizeof(float)), timeout);
 	HAL_UART_Transmit(huart, (uint8_t*)buf->advantage_buffer, (uint16_t)(step_count * sizeof(float)), timeout);
 	HAL_UART_Transmit(huart, (uint8_t*)_dbg_logits,           (uint16_t)(step_count * od * sizeof(float)), timeout);

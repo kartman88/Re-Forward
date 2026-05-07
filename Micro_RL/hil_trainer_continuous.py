@@ -96,13 +96,17 @@ def recv_debug_batch(ser, obs_dim):
     step_count = struct.unpack('<I', ser.read(4))[0]
     out_dim    = struct.unpack('<I', ser.read(4))[0]
     states   = np.frombuffer(ser.read(step_count * obs_dim * 4), dtype=np.float32).reshape(step_count, obs_dim).copy()
+    if USE_CONTINUOUS_ACTIONS:
+        actions = np.frombuffer(ser.read(step_count * 4), dtype=np.float32).copy()
+    else:
+        actions = np.frombuffer(ser.read(step_count), dtype=np.uint8).copy()
     returns  = np.frombuffer(ser.read(step_count * 4), dtype=np.float32).copy()
     adv_norm = np.frombuffer(ser.read(step_count * 4), dtype=np.float32).copy()
     logits   = np.frombuffer(ser.read(step_count * out_dim * 4), dtype=np.float32).reshape(step_count, out_dim).copy()
     loss     = struct.unpack('<f', ser.read(4))[0]
     ser.read(1)  # ETX 0x08
     ser.timeout = old_to
-    return {'states': states, 'raw_returns': returns,
+    return {'states': states, 'actions': actions, 'raw_returns': returns,
             'norm_advantages': adv_norm, 'logits': logits, 'loss': loss}
 
 def clear_console():
