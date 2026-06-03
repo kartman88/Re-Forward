@@ -83,7 +83,7 @@ def main():
         return
 
     # Inizializza Ambiente
-    env = gym.make(ENV_NAME, render_mode="human") #, render_mode="human"
+    env = gym.make(ENV_NAME) #, render_mode="human"
     
     # Setup Grafici (Matplotlib)
     plt.ion()
