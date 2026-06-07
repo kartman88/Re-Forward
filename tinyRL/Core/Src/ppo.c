@@ -1,4 +1,5 @@
 #include "ppo.h"
+#include "rng.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -120,10 +121,7 @@ void ppo_sigma_decay(void) {
 }
 
 static float randn(void) {
-    float u1, u2;
-    do { u1 = (float)rand() / (float)RAND_MAX; } while (u1 == 0.f);
-    u2 = (float)rand() / (float)RAND_MAX;
-    return sqrtf(-2.f * logf(u1)) * cosf(6.2831853f * u2);
+    return rng_normal();
 }
 
 void actor_sample_action(Network *actor, float *obs, float *action_out,
@@ -131,6 +129,8 @@ void actor_sample_action(Network *actor, float *obs, float *action_out,
                          Network *critic) {
     network_forward(actor, obs, NULL);
     float *mu = actor->layers[actor->num_layers - 1].out;
+    for (int i = 0; i < N_ACT_DIMS; i++)
+        mu[i] = fmaxf(fminf(mu[i], MU_CLAMP), -MU_CLAMP);
 
     float log_prob = 0.f;
     for (int i = 0; i < N_ACT_DIMS; i++) {
@@ -161,7 +161,7 @@ uint32_t actor_sample_action(Network *actor, float *obs,
     static float probs[PPO_N_ACTIONS];
     network_forward(actor, obs, probs);
 
-    float r = (float)rand() / (float)RAND_MAX;
+    float r = rng_uniform();
     uint32_t action = (uint32_t)(PPO_N_ACTIONS - 1);
     float cumsum = 0.f;
     for (uint32_t i = 0; i < (uint32_t)PPO_N_ACTIONS; i++) {
@@ -197,7 +197,7 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
     for (int epoch = 0; epoch < PPO_EPOCHS; epoch++) {
 
         for (uint32_t i = N - 1; i > 0; i--) {
-            uint32_t j   = (uint32_t)rand() % (i + 1);
+            uint32_t j   = rng_u32() % (i + 1);
             uint32_t tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
         }
 
@@ -280,6 +280,7 @@ int ppo_agent_init(PPOAgent *agent, Network *actor, Network *critic,
     agent->first_step         = 1;
     agent->prev_log_prob      = 0.f;
     agent->prev_value         = 0.f;
+    agent->prev_done          = 0;
     agent->done               = 0;
 
     memset(agent->prev_obs, 0, sizeof(agent->prev_obs));
@@ -303,17 +304,21 @@ int ppo_agent_init(PPOAgent *agent, Network *actor, Network *critic,
 
 void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
 {
-    // 1. Compute done for the transition about to be stored
+    // 1. done dello stato CORRENTE (inviato via UART; comanda il reset lato PC).
+    //    Convenzione allineata a pc_ppo_trainer.py: done = is_done(s_t).
     agent->done = agent->done_fn(agent->step_in_ep);
 
-    // 2. Push previous transition (skip on very first call)
+    // 2. Push della transizione precedente (s_{t-1}, a_{t-1}). Il suo done e'
+    //    prev_done = is_done(s_{t-1}), NON il done corrente. La transizione dello
+    //    stato terminale NON viene scartata: verra' spinta alla chiamata
+    //    successiva, esattamente come fa la baseline PC.
     if (!agent->first_step) {
         float reward = agent->reward_fn(agent->prev_obs, agent->prev_action);
         rollout_buffer_push(&agent->buf,
                             agent->prev_obs,
                             agent->prev_action,
                             reward,
-                            agent->done,
+                            agent->prev_done,
                             agent->prev_log_prob,
                             agent->prev_value);
     }
@@ -329,15 +334,16 @@ void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
     memcpy(agent->prev_action, action, N_ACT_DIMS * sizeof(float));
     agent->prev_log_prob = log_prob;
     agent->prev_value    = value_critic;
+    agent->prev_done     = agent->done;   // done di s_t, usato al prossimo push
 
     // 5. Output raw action — user clips before sending if desired
     memcpy(action_out, action, N_ACT_DIMS * sizeof(float));
 
-    // 6. Update counters
+    // 6. Update counters — su done resettiamo solo il contatore di episodio.
+    //    NON impostiamo first_step (la transizione terminale va comunque spinta).
     agent->first_step = 0;
     if (agent->done) {
         agent->step_in_ep = 0;
-        agent->first_step = 1;
     } else {
         agent->step_in_ep++;
     }
@@ -345,10 +351,9 @@ void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
 
     // 7. Trigger training when rollout is full
     if (agent->rollout_step_count >= ROLLOUT_STEPS) {
-        // Bootstrap: 0 if last step was terminal, else V(s_current)
-        float last_val = agent->first_step
-                         ? 0.f
-                         : critic_forward(agent->critic, (float *)obs);
+        // Bootstrap con V(obs): obs e' sempre il successore dell'ultima
+        // transizione spinta. Se quella era terminale, GAE lo ignora (not_done=0).
+        float last_val = critic_forward(agent->critic, (float *)obs);
         compute_gae(&agent->buf, last_val, PPO_GAMMA, PPO_LAMBDA);
         normalize_advantages(&agent->buf);
         if (agent->buf.size >= PPO_BATCH_SIZE) {
@@ -366,17 +371,18 @@ void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
 
 uint32_t ppo_step_discrete(PPOAgent *agent, const float *obs)
 {
-    // 1. Compute done
+    // 1. done dello stato corrente (convenzione allineata a pc)
     agent->done = agent->done_fn(agent->step_in_ep);
 
-    // 2. Push previous transition
+    // 2. Push della transizione precedente con il suo prev_done (transizione
+    //    terminale mantenuta, spinta al passo successivo come fa pc).
     if (!agent->first_step) {
         float reward = agent->reward_fn(agent->prev_obs, agent->prev_action);
         rollout_buffer_push(&agent->buf,
                             agent->prev_obs,
                             agent->prev_action,
                             reward,
-                            agent->done,
+                            agent->prev_done,
                             agent->prev_log_prob,
                             agent->prev_value);
     }
@@ -391,12 +397,12 @@ uint32_t ppo_step_discrete(PPOAgent *agent, const float *obs)
     agent->prev_action   = action;
     agent->prev_log_prob = log_prob;
     agent->prev_value    = value_critic;
+    agent->prev_done     = agent->done;
 
-    // 5. Update counters
+    // 5. Update counters — su done reset solo del contatore episodio.
     agent->first_step = 0;
     if (agent->done) {
         agent->step_in_ep = 0;
-        agent->first_step = 1;
     } else {
         agent->step_in_ep++;
     }
@@ -404,9 +410,7 @@ uint32_t ppo_step_discrete(PPOAgent *agent, const float *obs)
 
     // 6. Trigger training when rollout is full
     if (agent->rollout_step_count >= ROLLOUT_STEPS) {
-        float last_val = agent->first_step
-                         ? 0.f
-                         : critic_forward(agent->critic, (float *)obs);
+        float last_val = critic_forward(agent->critic, (float *)obs);
         compute_gae(&agent->buf, last_val, PPO_GAMMA, PPO_LAMBDA);
         normalize_advantages(&agent->buf);
         if (agent->buf.size >= PPO_BATCH_SIZE) {

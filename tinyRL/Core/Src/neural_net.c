@@ -210,6 +210,17 @@ void network_clip_grad(Network *net) {
     }
     const float CLIP  = 0.5f;
     float gnorm = sqrtf(gnorm_sq);
+    if (!isfinite(gnorm)) {
+        // Gradiente non finito (Inf/NaN): scarta l'update azzerando i gradienti
+        // per non scrivere NaN nei pesi. Rete di sicurezza, non dovrebbe scattare.
+        for (int l = 0; l < net->num_layers; l++) {
+            DenseLayer *ly = &net->layers[l];
+            memset(ly->db, 0, ly->out_dim * sizeof(float));
+            for (int i = 0; i < ly->out_dim; i++)
+                memset(ly->dW[i], 0, ly->in_dim * sizeof(float));
+        }
+        return;
+    }
     if (gnorm > CLIP) {
         float s = CLIP / gnorm;
         for (int l = 0; l < net->num_layers; l++) {
@@ -241,6 +252,8 @@ void actor_forward_continuous(Network *actor, float *obs, float *action,
     int D = N_ACT_DIMS;
     network_forward(actor, obs, NULL);
     float *mu = actor->layers[actor->num_layers - 1].out;
+    for (int i = 0; i < D; i++)
+        mu[i] = fmaxf(fminf(mu[i], MU_CLAMP), -MU_CLAMP);
 
     float log_prob = 0.f;
     float H        = 0.5f * (float)D * (1.f + LOG_2PI_C);

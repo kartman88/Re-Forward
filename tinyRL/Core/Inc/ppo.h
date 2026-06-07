@@ -115,6 +115,7 @@ typedef struct {
     float          prev_log_prob;
     float          prev_value;
 
+    uint8_t        prev_done;      // done dello stato precedente (per push allineato a pc)
     uint8_t        done;           // set inside ppo_step, readable by caller
 
     ppo_reward_fn  reward_fn;

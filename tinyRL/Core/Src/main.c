@@ -25,6 +25,7 @@
 #include "uart.h"
 #include "ppo.h"
 #include "utils.h"
+#include "rng.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -76,15 +77,14 @@ static float compute_reward(const float *obs, uint32_t act) {
 }
 #else
 static float compute_reward(const float *obs, const float *action) {
-    // Walker2d-v4: r = healthy_reward + x_velocity - ctrl_cost
-    // healthy_reward = 1.0 se z in [0.8, 2.0] e angle in [-1.0, 1.0]
-    // obs[8] = qvel[0] = forward (x) velocity
-    float healthy = (obs[0] >= 0.8f && obs[0] <= 2.0f &&
-                     obs[1] >= -1.0f && obs[1] <= 1.0f) ? 1.0f : 0.0f;
+    // Hopper-v4: r = healthy_reward + x_velocity - ctrl_cost
+    // healthy_reward = 1.0 solo se il Hopper è sano (obs[0]=z >= 0.7, obs[1]=angle in [-0.2, 0.2])
+    // obs[5] = qvel[0] = forward (x) velocity
+    float healthy = (obs[0] >= 0.7f && obs[1] >= -0.2f && obs[1] <= 0.2f) ? 1.0f : 0.0f;
     float ctrl_cost = 0.0f;
     for (int i = 0; i < N_ACT_DIMS; i++)
         ctrl_cost += action[i] * action[i];
-    return healthy + obs[8] - 1e-3f * ctrl_cost;
+    return healthy + obs[5] - 1e-3f * ctrl_cost;
 }
 #endif
 
@@ -94,9 +94,8 @@ static float s_cur_obs[OBS_DIM];
 static uint8_t is_done(uint32_t step_in_ep) {
     if (step_in_ep >= MAX_STEPS_PER_EP) return 1;
 #if USE_CONTINUOUS_ACTION
-    // Walker2D termina se cade (z fuori [0.8, 2.0]) o si inclina troppo (|angle| > 1.0)
-    if (s_cur_obs[0] < 0.8f || s_cur_obs[0] > 2.0f ||
-        s_cur_obs[1] < -1.0f || s_cur_obs[1] > 1.0f) return 1;
+    // Hopper termina se cade (z < 0.7) o il busto si inclina troppo (|angle| > 0.2)
+    if (s_cur_obs[0] < 0.7f || s_cur_obs[1] < -0.2f || s_cur_obs[1] > 0.2f) return 1;
 #endif
     return 0;
 }
@@ -106,6 +105,11 @@ static void on_train_begin(void) {
 }
 static void on_train_end(void) {
     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+    // Durante la pausa di training la UART e' andata in overrun e nella RX si
+    // sono accumulati byte (ritrasmissioni del PC). Azzeriamo l'overrun e
+    // svuotiamo la RX cosi' la lettura riparte allineata su un frame nuovo.
+    __HAL_UART_CLEAR_OREFLAG(&huart3);
+    __HAL_UART_SEND_REQ(&huart3, UART_RXDATA_FLUSH_REQUEST);
 }
 /* USER CODE END 0 */
 
@@ -145,7 +149,7 @@ int main(void) {
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   dwt_init();
-  srand(HAL_GetTick());
+  rng_seed(HAL_GetTick());
 
   Network  actor, critic;
   PPOAgent agent;
@@ -186,6 +190,17 @@ int main(void) {
   /* USER CODE BEGIN WHILE */
   while (1) {
     if (!uart_recv_floats(&huart3, obs, OBS_DIM, 100))
+        continue;
+
+    // Ultima difesa (oltre a checksum+ETX in uart_recv_floats): scarta i frame
+    // con osservazioni non finite o di magnitudine assurda. Un frame disallineato
+    // post-overrun puo' contenere float spazzatura finiti ma enormi (es. 1e30):
+    // passerebbero isfinite, ma un obs gigante genera un update enorme che satura
+    // mu e fa collassare la policy. La soglia 1000 e' molto sopra i valori legit.
+    int obs_ok = 1;
+    for (int i = 0; i < OBS_DIM; i++)
+        if (!isfinite(obs[i]) || fabsf(obs[i]) > 1000.0f) { obs_ok = 0; break; }
+    if (!obs_ok)
         continue;
 
 #if USE_CONTINUOUS_ACTION

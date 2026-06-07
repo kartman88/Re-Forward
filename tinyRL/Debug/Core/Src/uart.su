@@ -1,4 +1,4 @@
 ../Core/Src/uart.c:4:5:uart_recv_floats	32	static
-../Core/Src/uart.c:16:5:uart_send_float_action	16	static
-../Core/Src/uart.c:26:5:uart_send_floats_action	88	static
-../Core/Src/uart.c:37:5:uart_send_action_discrete	16	static
+../Core/Src/uart.c:34:5:uart_send_float_action	16	static
+../Core/Src/uart.c:44:5:uart_send_floats_action	88	static
+../Core/Src/uart.c:55:5:uart_send_action_discrete	16	static

@@ -2,6 +2,7 @@ import time
 import struct
 import serial
 import os
+import csv
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
@@ -22,15 +23,33 @@ USE_CONTINUOUS_ACTIONS = True     # False = azione discreta (es. CartPole)
 # ------------------------------------------------------------
 #  CONFIGURAZIONE TASK  ← modifica solo qui quando cambi task
 # ------------------------------------------------------------
-ENV_NAME        = "Walker2d-v4"    # Nome ambiente Gymnasium
-OBS_DIM         = 17             # Dimensione spazio osservazione
-ACTION_DIM      = 6              # Continuo: n. dims  |  Discreto: n. classi
+ENV_NAME        = "Hopper-v4"      # Nome ambiente Gymnasium
+OBS_DIM         = 11             # Dimensione spazio osservazione
+ACTION_DIM      = 3              # Continuo: n. dims  |  Discreto: n. classi
 ACTION_RANGE    = (-1.0, 1.0)    # (low, high) di ogni azione — usato nei plot
 ENV_KWARGS      = {"terminate_when_unhealthy": False, "render_mode": "human"}  # kwargs extra per gym.make
 
 # Parametri Grafici
 PLOT_EVERY_N_EPISODES = 5
 CONSOLE_LINES = 5
+
+# ------------------------------------------------------------
+#  LOGGING CSV  (stesso formato di pc_ppo_trainer.py per sovrapporre le curve)
+# ------------------------------------------------------------
+LOG_FOLDER   = "learning_curve_comparison"
+LOG_FILENAME = "training_ppo_mcu.csv"
+
+
+def compute_reward(obs, action):
+    """Replica esatta di compute_reward() del micro (main.c, Hopper-v4).
+
+    Necessaria per misurare la STESSA reward che il micro ottimizza: la curva
+    diventa cosi' confrontabile con pc_ppo_trainer.py, che somma anch'esso questa
+    reward custom (non quella nativa di gym).
+    """
+    healthy = 1.0 if (obs[0] >= 0.7 and -0.2 <= obs[1] <= 0.2) else 0.0
+    ctrl_cost = float(np.sum(np.square(action)))
+    return healthy + float(obs[5]) - 1e-3 * ctrl_cost
 
 # ------------------------------------------------------------
 #  STRUCT SERIALI (auto-calcolate, non toccare)
@@ -50,9 +69,17 @@ _ACTION_FRAME_LEN = 1 + ACTION_BYTE_SIZE + 1 + 1   # STX + action_bytes + done +
 #  FUNZIONI SERIALI
 # ------------------------------------------------------------
 def send_state(ser: serial.Serial, obs: np.ndarray):
-    """Invia gli OBS_DIM float32 in little-endian tra 0x02 e 0x03"""
+    """Invia gli OBS_DIM float32 LE: STX + payload + checksum(XOR) + ETX.
+
+    Il checksum + ETX permettono al micro di scartare i frame disallineati che
+    si verificano dopo la lunga pausa di training (overrun UART): senza di essi
+    un frame spazzatura passava i controlli e avvelenava il training.
+    """
     payload = struct.pack(_STATE_STRUCT, *obs.astype(np.float32))
-    ser.write(b'\x02' + payload + b'\x03')
+    chk = 0
+    for b in payload:
+        chk ^= b
+    ser.write(b'\x02' + payload + bytes([chk]) + b'\x03')
 
 def recv_action_done(ser: serial.Serial):
     """Legge il frame di risposta. Ritorna (actions, done) o None se incompleto.
@@ -127,11 +154,19 @@ def main():
     update_count = 0
     last_update_time = 0.0
 
+    # CSV nello stesso formato di pc_ppo_trainer.py
+    os.makedirs(LOG_FOLDER, exist_ok=True)
+    csv_path = os.path.join(LOG_FOLDER, LOG_FILENAME)
+    csv_file = open(csv_path, "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(["episode", "step", "reward", "episode_steps"])
+
     obs, _ = env.reset()
 
     try:
         while True:
             current_ep_reward = 0.0
+            ep_steps = 0
             done = False
             state_sent = False
             last_tx_ms = 0.0
@@ -173,7 +208,11 @@ def main():
                     update_count += 1
                     last_update_time = wait_time
 
-                # 4. Step nell'ambiente fisico
+                # 4. Reward custom (identica a quella del micro) calcolata sullo
+                #    stato INVIATO al micro e sull'azione ricevuta, PRIMA dello step.
+                step_reward = compute_reward(obs, actions)
+
+                # 5. Step nell'ambiente fisico
                 # actions è già un np.ndarray (continuo) o int (discreto) — pronto per gym
                 obs, r, terminated, truncated, _ = env.step(actions)
 
@@ -184,8 +223,9 @@ def main():
                     obs, _ = env.reset()
 
                 done = mcu_done
-                
-                current_ep_reward += r
+
+                current_ep_reward += step_reward
+                ep_steps += 1
                 global_step += 1
                 
                 # Resettiamo il cronometro per il prossimo step
@@ -196,6 +236,11 @@ def main():
             moving_avg_queue.append(current_ep_reward)
             current_avg = np.mean(moving_avg_queue)
             moving_avg_history.append(current_avg)
+
+            # Log CSV (stesso formato di pc_ppo_trainer.py)
+            csv_writer.writerow([episode_count, global_step,
+                                 current_ep_reward, ep_steps])
+            csv_file.flush()
 
             # Prepara riga per la Dashboard
             row = f"{episode_count:8d} | {current_ep_reward:7.1f} | {current_avg:10.1f} | {global_step:9d} | {update_count:9d}"
@@ -251,6 +296,8 @@ def main():
         clear_console()
         print("\n[PC] Training interrotto dall'utente. Risorse liberate.")
     finally:
+        csv_file.close()
+        print(f"[PC] Log salvato in {csv_path}")
         env.close()
         ser.close()
         plt.ioff()

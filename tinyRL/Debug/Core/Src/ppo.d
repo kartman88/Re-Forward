@@ -29,7 +29,8 @@ Core/Src/ppo.o: ../Core/Src/ppo.c ../Core/Inc/ppo.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
- ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h
+ ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
+ ../Core/Inc/rng.h
 ../Core/Inc/ppo.h:
 ../Core/Inc/neural_net.h:
 ../Core/Inc/dense_layer.h:
@@ -64,3 +65,4 @@ Core/Src/ppo.o: ../Core/Src/ppo.c ../Core/Inc/ppo.h \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h:
+../Core/Inc/rng.h:

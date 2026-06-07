@@ -10,6 +10,7 @@ C_SRCS += \
 ../Core/Src/neural_net.c \
 ../Core/Src/ppo.c \
 ../Core/Src/reinforce.c \
+../Core/Src/rng.c \
 ../Core/Src/stm32h7xx_hal_msp.c \
 ../Core/Src/stm32h7xx_it.c \
 ../Core/Src/syscalls.c \
@@ -24,6 +25,7 @@ OBJS += \
 ./Core/Src/neural_net.o \
 ./Core/Src/ppo.o \
 ./Core/Src/reinforce.o \
+./Core/Src/rng.o \
 ./Core/Src/stm32h7xx_hal_msp.o \
 ./Core/Src/stm32h7xx_it.o \
 ./Core/Src/syscalls.o \
@@ -38,6 +40,7 @@ C_DEPS += \
 ./Core/Src/neural_net.d \
 ./Core/Src/ppo.d \
 ./Core/Src/reinforce.d \
+./Core/Src/rng.d \
 ./Core/Src/stm32h7xx_hal_msp.d \
 ./Core/Src/stm32h7xx_it.d \
 ./Core/Src/syscalls.d \
@@ -54,7 +57,7 @@ Core/Src/%.o Core/Src/%.su Core/Src/%.cyclo: ../Core/Src/%.c Core/Src/subdir.mk
 clean: clean-Core-2f-Src
 
 clean-Core-2f-Src:
-	-$(RM) ./Core/Src/dense_layer.cyclo ./Core/Src/dense_layer.d ./Core/Src/dense_layer.o ./Core/Src/dense_layer.su ./Core/Src/main.cyclo ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/neural_net.cyclo ./Core/Src/neural_net.d ./Core/Src/neural_net.o ./Core/Src/neural_net.su ./Core/Src/ppo.cyclo ./Core/Src/ppo.d ./Core/Src/ppo.o ./Core/Src/ppo.su ./Core/Src/reinforce.cyclo ./Core/Src/reinforce.d ./Core/Src/reinforce.o ./Core/Src/reinforce.su ./Core/Src/stm32h7xx_hal_msp.cyclo ./Core/Src/stm32h7xx_hal_msp.d ./Core/Src/stm32h7xx_hal_msp.o ./Core/Src/stm32h7xx_hal_msp.su ./Core/Src/stm32h7xx_it.cyclo ./Core/Src/stm32h7xx_it.d ./Core/Src/stm32h7xx_it.o ./Core/Src/stm32h7xx_it.su ./Core/Src/syscalls.cyclo ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.cyclo ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32h7xx.cyclo ./Core/Src/system_stm32h7xx.d ./Core/Src/system_stm32h7xx.o ./Core/Src/system_stm32h7xx.su ./Core/Src/uart.cyclo ./Core/Src/uart.d ./Core/Src/uart.o ./Core/Src/uart.su ./Core/Src/utils.cyclo ./Core/Src/utils.d ./Core/Src/utils.o ./Core/Src/utils.su
+	-$(RM) ./Core/Src/dense_layer.cyclo ./Core/Src/dense_layer.d ./Core/Src/dense_layer.o ./Core/Src/dense_layer.su ./Core/Src/main.cyclo ./Core/Src/main.d ./Core/Src/main.o ./Core/Src/main.su ./Core/Src/neural_net.cyclo ./Core/Src/neural_net.d ./Core/Src/neural_net.o ./Core/Src/neural_net.su ./Core/Src/ppo.cyclo ./Core/Src/ppo.d ./Core/Src/ppo.o ./Core/Src/ppo.su ./Core/Src/reinforce.cyclo ./Core/Src/reinforce.d ./Core/Src/reinforce.o ./Core/Src/reinforce.su ./Core/Src/rng.cyclo ./Core/Src/rng.d ./Core/Src/rng.o ./Core/Src/rng.su ./Core/Src/stm32h7xx_hal_msp.cyclo ./Core/Src/stm32h7xx_hal_msp.d ./Core/Src/stm32h7xx_hal_msp.o ./Core/Src/stm32h7xx_hal_msp.su ./Core/Src/stm32h7xx_it.cyclo ./Core/Src/stm32h7xx_it.d ./Core/Src/stm32h7xx_it.o ./Core/Src/stm32h7xx_it.su ./Core/Src/syscalls.cyclo ./Core/Src/syscalls.d ./Core/Src/syscalls.o ./Core/Src/syscalls.su ./Core/Src/sysmem.cyclo ./Core/Src/sysmem.d ./Core/Src/sysmem.o ./Core/Src/sysmem.su ./Core/Src/system_stm32h7xx.cyclo ./Core/Src/system_stm32h7xx.d ./Core/Src/system_stm32h7xx.o ./Core/Src/system_stm32h7xx.su ./Core/Src/uart.cyclo ./Core/Src/uart.d ./Core/Src/uart.o ./Core/Src/uart.su ./Core/Src/utils.cyclo ./Core/Src/utils.d ./Core/Src/utils.o ./Core/Src/utils.su
 
 .PHONY: clean-Core-2f-Src
 
