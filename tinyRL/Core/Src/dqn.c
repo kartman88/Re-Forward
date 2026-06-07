@@ -1,4 +1,5 @@
 #include "dqn.h"
+#include "rng.h"
 
 int replay_buffer_init(ReplayBuffer *buf, uint32_t capacity, uint32_t obs_dim) {
     buf->capacity = capacity;
@@ -74,9 +75,9 @@ float calc_epsilon(uint32_t step) {
 
 uint32_t dqn_select_action(QNetwork *net, float *obs, float epsilon,
                             uint32_t n_actions) {
-    float r = (float)rand() / ((float)RAND_MAX + 1.0f);
+    float r = rng_uniform();
     if (r < epsilon)
-        return (uint32_t)((uint32_t)rand() % n_actions);
+        return rng_u32() % n_actions;
 
     float q[N_ACTIONS];
     forward_q(net, obs, q);
@@ -95,7 +96,7 @@ void dqn_train(QNetwork *online, TargetNetwork *target,
     zero_grad_q(online);
 
     for (uint32_t b = 0; b < batch_size; b++) {
-        uint32_t idx    = (uint32_t)rand() % buf->size;
+        uint32_t idx    = rng_u32() % buf->size;
         float   *s      = buf->state[idx];
         float   *s_next = buf->next_state[idx];
         uint32_t act    = buf->action[idx];

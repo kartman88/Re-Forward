@@ -2,6 +2,7 @@
 #include "stm32h7xx_hal.h"
 #include "main.h"
 #include "dense_layer.h"
+#include "rng.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -9,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static inline float frand(void) { return (float)rand() / RAND_MAX;}
+static inline float frand(void) { return rng_uniform(); }
 
 int free_2d(float ***matrix, int rows) {
     if (matrix == NULL || *matrix == NULL || rows <= 0)

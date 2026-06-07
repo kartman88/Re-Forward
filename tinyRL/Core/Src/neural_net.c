@@ -251,6 +251,16 @@ void gradient_norm_q(QNetwork *net) {
     }
     const float CLIP  = 0.5f;
     float gnorm = sqrtf(gnorm_sq);
+    if (!isfinite(gnorm)) {
+        // gradiente non finito: scarta l'update azzerando i gradienti
+        for (int l = 0; l < net->num_layers; l++) {
+            DenseLayer *ly = &net->layers[l];
+            memset(ly->db, 0, ly->out_dim * sizeof(float));
+            for (int i = 0; i < ly->out_dim; i++)
+                memset(ly->dW[i], 0, ly->in_dim * sizeof(float));
+        }
+        return;
+    }
     if (gnorm > CLIP) {
         float s = CLIP / gnorm;
         for (int l = 0; l < net->num_layers; l++) {

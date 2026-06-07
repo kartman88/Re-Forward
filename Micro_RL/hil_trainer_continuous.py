@@ -50,6 +50,14 @@ def send_state(ser: serial.Serial, obs: np.ndarray):
     payload = struct.pack(_STATE_STRUCT, *obs.astype(np.float32))
     ser.write(b'\x02' + payload + b'\x03')
 
+def compute_reward(obs, action_val):
+    """Replica di evaluate_reward_pendulum() del micro (main.c, Pendulum-v1).
+    Garantisce parita' di misura tra le curve C e quelle Python."""
+    theta = np.arctan2(obs[1], obs[0])
+    omega = obs[2]
+    u     = float(action_val)   # torque gia' ricevuto dal micro
+    return -(theta * theta + 0.1 * omega * omega + 0.001 * u * u)
+
 def recv_action_done(ser: serial.Serial):
     """Legge il frame di risposta. Ritorna (azione_decodificata, done) o None se incompleto."""
     frame = ser.read(_ACTION_FRAME_LEN)
@@ -166,16 +174,20 @@ def main():
                     # Gli ambienti discreti richiedono un intero
                     action_to_env = int(action_val)
                 
+                # Reward calcolata sullo stato PRE-step (lo stesso che ha visto
+                # il micro), replicando esattamente la formula del firmware.
+                step_reward = compute_reward(obs, action_val)
+
                 # Step nell'ambiente fisico
                 obs, r, terminated, truncated, _ = env.step(action_to_env)
                 #print("REWARD:", r)  # Debug: stampa il reward ricevuto
                 #Divido per 8 l'obs[2] per normalizzare
                 #obs[2] /= 8
-                
+
                 # LA VERA MAGIA: Ci fidiamo SOLO del microcontrollore!
-                done = mcu_done  
-                
-                current_ep_reward += r
+                done = mcu_done
+
+                current_ep_reward += step_reward
                 global_step += 1
                 
                 # Resettiamo il cronometro per il prossimo step

@@ -23,8 +23,10 @@
 /* USER CODE BEGIN Includes */
 #include "neural_net.h"
 #include "dqn.h"
+#include "rng.h"
 #include "utils.h"
 #include <stdio.h>
+#include <math.h>
 
 /* USER CODE END Includes */
 
@@ -108,7 +110,7 @@ int main(void) {
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   dwt_init();
-  srand(HAL_GetTick());
+  rng_seed(HAL_GetTick());
 
   QNetwork      online;
   TargetNetwork target;
@@ -149,6 +151,12 @@ int main(void) {
   while (1) {
     if (!uart_recv_floats(&huart3, obs, OBS_DIM, 100))
         continue;
+
+    int obs_ok = 1;
+    for (int i = 0; i < OBS_DIM; i++)
+        if (!isfinite(obs[i]) || fabsf(obs[i]) > 1000.0f) { obs_ok = 0; break; }
+    if (!obs_ok)
+        continue;   // frame sporco: il PC lo ritrasmette
 
     manual_done   = (step_in_ep >= MAX_STEPS_PER_EP);
     manual_reward = first_step ? 0.0f
