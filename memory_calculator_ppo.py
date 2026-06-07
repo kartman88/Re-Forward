@@ -171,17 +171,19 @@ def section_total(items):
     return sum(b for _, b in items)
 
 
-def memory_totals(hidden, obs_dim, n_act_dims, T, batch_size):
-    """Totale memoria (byte) per mio approccio e classico, con UN hidden layer.
+def memory_totals(hidden, obs_dim, n_act_dims, T, batch_size, depth=1):
+    """Totale memoria (byte) per mio approccio e classico, con `depth` hidden layer.
 
-    actor = [obs, hidden, n_act], critic = [obs, hidden, 1].
+    actor  = [obs, hidden, ..., hidden, n_act]  (depth volte hidden)
+    critic = [obs, hidden, ..., hidden, 1]       (depth volte hidden)
+    Con depth=1 si ricade nel caso a un solo hidden layer.
     Le reti (W,b + grad + Adam), il rollout buffer e lo stack sono identici nei due
     approcci. La differenza e' solo nelle attivazioni: l'on-device ne tiene 1 copia
     (gia' inclusa nel campo .out di ogni DenseLayer), un trainer autograd a minibatch
     ne tiene batch_size copie -> overhead (batch_size - 1) per campione.
     """
-    actor_topo  = [obs_dim, hidden, n_act_dims]
-    critic_topo = [obs_dim, hidden, 1]
+    actor_topo  = [obs_dim] + [hidden] * depth + [n_act_dims]
+    critic_topo = [obs_dim] + [hidden] * depth + [1]
 
     nets    = section_total(network_breakdown(actor_topo, "Actor")) + \
               section_total(network_breakdown(critic_topo, "Critic"))
@@ -209,7 +211,7 @@ def run_plot(args):
     mine_kb, classic_kb = [], []
     for h in hiddens:
         mine, classic = memory_totals(int(h), args.obs, args.act,
-                                      args.rollout, args.batch)
+                                      args.rollout, args.batch, args.depth)
         mine_kb.append(mine / 1024.0)
         classic_kb.append(classic / 1024.0)
 
@@ -244,7 +246,8 @@ def run_plot(args):
     plt.xlabel("Dimensione hidden layer (unita')", fontsize=13)
     plt.ylabel("Consumo memoria (KB)", fontsize=13)
     plt.title(f"Memoria PPO vs backprop classica  "
-              f"(obs={args.obs}, act={args.act}, rollout={args.rollout})")
+              f"(obs={args.obs}, act={args.act}, depth={args.depth}, "
+              f"rollout={args.rollout})")
     plt.xlim(args.hmin, args.hmax)
     plt.ylim(bottom=0)
     plt.grid(True, linestyle="--", alpha=0.3)
@@ -371,6 +374,7 @@ def main():
     cfg = argparse.Namespace()
     cfg.obs     = ask_int("obs_dim", 11)
     cfg.act     = ask_int("n_act_dims", 3)
+    cfg.depth   = ask_int("Profondita' rete (n. hidden layer)", 2)
     cfg.rollout = ask_int("Rollout buffer T", 2048)
     cfg.batch   = ask_int("Batch size minibatch PPO", 64)
     cfg.hmin    = ask_int("Hidden layer minimo (asse X)", 16)
