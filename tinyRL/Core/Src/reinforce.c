@@ -1,5 +1,6 @@
 #include "reinforce.h"
 #include "utils.h"
+#include "rng.h"
 
 #if DEBUG
 static float _dbg_raw_returns[MAX_STEPS];
@@ -17,7 +18,7 @@ static float _dbg_loss;
 
 
 
-static inline float frand(void) { return (float)rand() / RAND_MAX;}
+static inline float frand(void) { return rng_uniform(); }
 
 
 int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim){
@@ -122,12 +123,12 @@ uint32_t sample_action(float *p, uint32_t dim){
 	const float EPSILON = 0.0f;               /* 1 % */
 
 	/* ─── 1. esplorazione pura ogni tanto ─── */
-	float r = (float)rand() / (float)RAND_MAX; /* uniform [0,1) */
+	float r = rng_uniform();                   /* uniform [0,1) */
 	if (r < EPSILON)
-		return (uint8_t)(rand() % dim);        /* azione random */
+		return (uint8_t)(rng_u32() % dim);     /* azione random */
 
 	/* ─── 2. campionamento “roulette-wheel” ─── */
-	float c = (float)rand() / (float)RAND_MAX; /* [0,1) */
+	float c = rng_uniform();                   /* [0,1) */
 	for (uint32_t i = 0; i < dim; ++i) {
 		if (c < p[i]) return (uint8_t)i;
 		c -= p[i];
@@ -190,7 +191,8 @@ int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t *step_count, action_t
     action_t a;
     #if USE_CONTINUOUS_ACTIONS
         // Usiamo una sigma fissa di 0.5 per esplorare
-        a = sample_continuous_action(output_forward[0], 0.5f);
+        float mu = fmaxf(fminf(output_forward[0], MU_CLAMP), -MU_CLAMP);
+        a = sample_continuous_action(mu, 0.5f);
     #else
         a = sample_action(output_forward, out_dim);
     #endif

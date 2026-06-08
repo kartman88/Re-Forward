@@ -191,13 +191,27 @@ void adam_optimizer(NeuralNet *net){
 }
 
 void gradient_norm(NeuralNet *net, uint32_t step_count){
+	int finite = 1;
 	for (int l = 0; l < net->num_layers; ++l) {
 		DenseLayer *ly = &net->layers[l];
 		for(int i = 0; i < ly->out_dim; ++i){
 			ly->db[i] /= (float)step_count;
+			if (!isfinite(ly->db[i])) finite = 0;
 			for(int j = 0; j < ly->in_dim; ++j){
 				ly->dW[i][j] /= (float)step_count;
+				if (!isfinite(ly->dW[i][j])) finite = 0;
 			}
+		}
+	}
+
+	/* Rete di sicurezza: se un gradiente è Inf/NaN scarta l'intero update
+	 * azzerando i gradienti, così non corrompe permanentemente i pesi. */
+	if (!finite) {
+		for (int l = 0; l < net->num_layers; ++l) {
+			DenseLayer *ly = &net->layers[l];
+			memset(ly->db, 0, ly->out_dim * sizeof(float));
+			for (int i = 0; i < ly->out_dim; ++i)
+				memset(ly->dW[i], 0, ly->in_dim * sizeof(float));
 		}
 	}
 }

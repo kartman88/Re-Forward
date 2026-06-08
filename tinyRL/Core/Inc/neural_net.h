@@ -5,7 +5,7 @@
 //Change this to decide which type of action you use
 #define USE_CONTINUOUS_ACTIONS 0
 
-#define DEBUG 1   // 1 = abilita dump dati per debug, 0 = nessun overhead
+#define DEBUG 0   // 1 = abilita dump dati per debug, 0 = nessun overhead
 
 #if USE_CONTINUOUS_ACTIONS
 	typedef float action_t;
@@ -13,17 +13,21 @@
 	typedef uint8_t action_t;
 #endif
 
-#define LR 0.0005f //0.01 and 0.02 good for CartPole
+#define LR 0.01f //0.01 and 0.02 good for CartPole
 #define BETA1 0.9f
 #define BETA2 0.999f
 #define EPS_ADAM 1e-8f
 #define GAMMA 0.99f
-#define ENT_BETA 0.01f //0.001 good for cartpole
+#define ENT_BETA 0.001f //0.001 good for cartpole
 #define MAX_EPISODE 100
 #define MAX_STEPS 200
 
 #define MAX_CONTINUOUS_ACTION 2.0f
 #define MIN_CONTINUOUS_ACTION -2.0f
+
+/* Limite sulla media (pre-rumore) della policy continua: impedisce il feedback
+ * che farebbe esplodere i pesi dell'actor in float32. */
+#define MU_CLAMP 8.0f
 
 typedef struct {
     DenseLayer *layers;

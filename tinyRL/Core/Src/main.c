@@ -23,7 +23,9 @@
 /* USER CODE BEGIN Includes */
 #include "neural_net.h"
 #include "reinforce.h"
+#include "rng.h"
 #include <stdio.h>
+#include <math.h>
 #include "utils.h"
 /* USER CODE END Includes */
 
@@ -99,7 +101,7 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  srand(HAL_GetTick() ^ 0xA5A5A5A5);
+  rng_seed(HAL_GetTick() ^ 0xA5A5A5A5);
   int input_size = 4;
   int buffer_size = MAX_STEPS;
 
@@ -135,6 +137,12 @@ int main(void)
 
   while (1){
 	if(uart_recv_floats(&huart2, obs, net_topology[0], 50)){
+		/* Sanity guard: scarta frame con obs non finiti o fuori scala
+		 * (un frame UART corrotto avvelenerebbe i ritorni Monte-Carlo). */
+		int obs_ok = 1;
+		for (int i = 0; i < net_topology[0]; i++)
+			if (!isfinite(obs[i]) || fabsf(obs[i]) > 1000.0f) { obs_ok = 0; break; }
+		if (!obs_ok) continue;   // frame sporco: il PC lo ritrasmette
 		if(step(&buffer, &net, obs, &step_count, &action, &done)){
 			//send action with usart
 			uart_send_action(&huart2, action, done, 50);

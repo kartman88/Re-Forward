@@ -20,7 +20,7 @@ MAX_WAIT_MS     = 100             # Ritrasmette l'osservazione se non arriva ris
 USE_CONTINUOUS_ACTIONS = False    # Metti a False per tornare al CartPole Discreto!
 
 # --- DEBUG DATA DUMP ---
-DEBUG_MODE   = True               # Riceve e salva i dati di debug dal micro dopo il 1° episodio
+DEBUG_MODE   = False               # Riceve e salva i dati di debug dal micro dopo il 1° episodio
 NET_TOPOLOGY = [4, 64, 2]         # Deve corrispondere alla topologia in main.c
 
 # Parametri Grafici
@@ -113,6 +113,19 @@ def clear_console():
     """Pulisce il terminale"""
     os.system('cls' if os.name == 'nt' else 'clear')
 
+def compute_reward(obs):
+    """Replica della evaluate_reward attiva sul micro (reinforce.c), così le curve
+    C vs Python misurano la STESSA reward invece di quella nativa di gym.
+    Mantenere allineata al blocco task attivo in reinforce.c."""
+    if USE_CONTINUOUS_ACTIONS:
+        # Pendulum: r = -(theta^2 + 0.1*theta_dt^2 + 0.001*torque^2), torque=0
+        theta = np.arctan2(obs[1], obs[0])
+        theta_dt = obs[2]
+        return float(-(theta * theta + 0.1 * theta_dt * theta_dt))
+    else:
+        # CartPole: reward costante +1 per step non terminale
+        return 1.0
+
 # ------------------------------------------------------------
 #  MAIN LOOP
 # ------------------------------------------------------------
@@ -200,11 +213,13 @@ def main():
                 
                 # Step nell'ambiente fisico
                 obs, r, terminated, truncated, _ = env.step(action_to_env)
-                
+
                 # LA VERA MAGIA: Ci fidiamo SOLO del microcontrollore!
-                done = mcu_done  
-                
-                current_ep_reward += r
+                done = mcu_done
+
+                # FIX 7: accumuliamo la stessa reward che calcola il micro
+                # (parità di misura C vs Python), non quella nativa di gym.
+                current_ep_reward += compute_reward(obs)
                 global_step += 1
                 
                 # Resettiamo il cronometro per il prossimo step

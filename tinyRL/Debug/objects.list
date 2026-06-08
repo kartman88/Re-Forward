@@ -2,6 +2,7 @@
 "./Core/Src/main.o"
 "./Core/Src/neural_net.o"
 "./Core/Src/reinforce.o"
+"./Core/Src/rng.o"
 "./Core/Src/stm32f4xx_hal_msp.o"
 "./Core/Src/stm32f4xx_it.o"
 "./Core/Src/syscalls.o"

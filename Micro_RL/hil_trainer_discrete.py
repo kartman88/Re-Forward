@@ -50,6 +50,11 @@ def clear_console():
     """Pulisce il terminale"""
     os.system('cls' if os.name == 'nt' else 'clear')
 
+def compute_reward(obs):
+    """Replica della evaluate_reward attiva sul micro (reinforce.c, blocco CartPole):
+    reward costante +1 per step non terminale. Garantisce parità di misura C vs Python."""
+    return 1.0
+
 def applica_fisica_personalizzata(env, m_pole=0.1, length=0.5):
     # Accediamo al core dell'ambiente
     u = env.unwrapped
@@ -147,9 +152,10 @@ def main():
                 obs, r, terminated, truncated, _ = env.step(action_to_env)
                 
                 # LA VERA MAGIA: Ci fidiamo SOLO del microcontrollore!
-                done = mcu_done  
-                
-                current_ep_reward += r
+                done = mcu_done
+
+                # FIX 7: stessa reward del micro (parità di misura), non quella di gym.
+                current_ep_reward += compute_reward(obs)
                 global_step += 1
                 
                 # Resettiamo il cronometro per il prossimo step

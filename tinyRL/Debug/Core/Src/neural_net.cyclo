@@ -5,4 +5,4 @@
 ../Core/Src/neural_net.c:91:6:backward_core	12
 ../Core/Src/neural_net.c:139:6:backward_pg	3
 ../Core/Src/neural_net.c:168:6:adam_optimizer	5
-../Core/Src/neural_net.c:193:6:gradient_norm	4
+../Core/Src/neural_net.c:193:6:gradient_norm	9
