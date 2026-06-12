@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+222#!/usr/bin/env python3
 """
 Memory consumption calculator for tinyRL DQN on STM32H7.
 
@@ -311,8 +311,6 @@ def run_report():
     print()
 
 
-MCU_LIMIT_BYTES = 1024 * 1024  # 1 MB (limite RAM del microcontrollore)
-
 # ===================================================================== #
 #   PANNELLO GRAFICO (stile scientifico, vedi PLOT_INSTRUCTION.md)
 # ===================================================================== #
@@ -324,14 +322,19 @@ PLOT_FORMATS    = ["pdf", "svg", "png"]
 
 COLOR_MINE      = "#1B9E77"     # verde acqua - approccio on-device
 COLOR_CLASSIC   = "#6A3D9A"     # viola       - backprop classica
-COLOR_LIMIT     = "#9A9A9A"     # grigio neutro per la linea limite MCU
 
 PLOT_LINE_WIDTH = 2.4
 PLOT_BAND_ALPHA = 0.12          # riempimento tra le due curve
 GRID_MAJOR      = dict(lw=0.6, alpha=0.45, color="0.6")
 GRID_MINOR      = dict(lw=0.3, alpha=0.30, color="0.75")
-SHOW_TITLE      = True
+SHOW_TITLE      = False
 TITLE_PAD       = 54
+
+MCU_BOARDS = {
+    "STM32F446 (128 KB)": {"bytes": 128 * 1024,      "color": "#E6AB02"},
+    "STM32H7 (1 MB)":     {"bytes": 1 * 1024 * 1024, "color": "#9A9A9A"},
+    "STM32N6 (4 MB)":     {"bytes": 4 * 1024 * 1024, "color": "#3182BD"},
+}
 # ===================================================================== #
 
 
@@ -366,7 +369,7 @@ def run_plot():
     capacity   = ask_int("Capacita' del replay buffer (REPLAY_SIZE)", 1000)
     batch_size = ask_int("Batch size", 64)
     h_min      = ask_int("Larghezza hidden minima", 8)
-    h_max      = ask_int("Larghezza hidden massima", 6000)
+    h_max      = ask_int("Larghezza hidden massima", 22000)
     n_points   = ask_int("Numero di punti sull'asse X", 200)
 
     widths = np.unique(np.linspace(h_min, h_max, max(2, n_points)).astype(int))
@@ -380,7 +383,6 @@ def run_plot():
 
     mine_kb    = np.array(mine_kb)
     classic_kb = np.array(classic_kb)
-    limit_kb   = MCU_LIMIT_BYTES / 1024.0
 
     # --- stampa di riepilogo testuale ---
     print(f"\n{'hidden':>8}{'mio (KB)':>14}{'classico (KB)':>16}{'extra %':>10}")
@@ -395,8 +397,6 @@ def run_plot():
         "font.family": "serif",
         "font.serif": list(families),
         "font.size": PLOT_FONT_SIZE,
-        "xtick.labelsize": PLOT_FONT_SIZE * 0.6,
-        "ytick.labelsize": PLOT_FONT_SIZE * 0.6,
         "mathtext.fontset": "stix",
         "axes.linewidth": 0.8,
         "svg.fonttype": "none",
@@ -417,29 +417,28 @@ def run_plot():
                     color=COLOR_CLASSIC, alpha=PLOT_BAND_ALPHA,
                     linewidth=0, zorder=2)
 
-    # linea limite MCU
-    ax.axhline(limit_kb, linestyle="--", color=COLOR_LIMIT,
-               linewidth=1.2, zorder=3)
-    ax.text(h_max, limit_kb, f"  MCU limit ({limit_kb/1024:.0f} MB)",
-            va="center", ha="left",
-            fontsize=PLOT_FONT_SIZE * 0.55, color=COLOR_LIMIT)
-
-    # --- incroci curva-limite con marker e tick colorati sull'asse X ---
-    crossings = []
-    for ys, curve_color in [(mine_kb, COLOR_MINE), (classic_kb, COLOR_CLASSIC)]:
-        if ys[0] <= limit_kb <= ys[-1]:
-            x_cross = float(np.interp(limit_kb, ys, widths))
-            ax.plot([x_cross], [limit_kb], "o", color=curve_color,
-                    markersize=8, zorder=7)
-            ax.vlines(x_cross, 0, limit_kb, color=curve_color,
-                      linestyle=":", linewidth=1.3, alpha=0.8, zorder=4)
-            crossings.append((x_cross, curve_color))
-            print(f"  >>> supera il limite a hidden width ~ {x_cross:.0f}")
+    # --- linee limite per scheda e incroci ---
+    crossings = []  # (x_cross, curve_color)
+    for board_name, board_cfg in MCU_BOARDS.items():
+        limit_kb = board_cfg["bytes"] / 1024.0
+        ax.axhline(limit_kb, linestyle="--", color=board_cfg["color"],
+                   linewidth=1.2, zorder=3, label=board_name)
+        for ys, curve_color in [(mine_kb, COLOR_MINE), (classic_kb, COLOR_CLASSIC)]:
+            if ys[0] <= limit_kb <= ys[-1]:
+                x_cross = float(np.interp(limit_kb, ys, widths))
+                ax.plot([x_cross], [limit_kb], "o", color=curve_color,
+                        markersize=7, zorder=7)
+                ax.vlines(x_cross, 0, limit_kb, color=curve_color,
+                          linestyle=":", linewidth=1.2, alpha=0.75, zorder=4)
+                crossings.append((x_cross, curve_color))
+                print(f"  >>> '{board_name}' superata a hidden ~ {x_cross:.0f}")
 
     ax.set_xlabel("Hidden layer size (units)")
     ax.set_ylabel("Memory (KB)")
     ax.set_xlim(h_min, h_max)
-    ax.set_ylim(bottom=0)
+    max_board_kb = max(cfg["bytes"] for cfg in MCU_BOARDS.values()) / 1024.0
+    ax.set_ylim(bottom=0,
+                top=max(classic_kb.max(), mine_kb.max(), max_board_kb) * 1.05)
 
     ax.yaxis.set_minor_locator(AutoMinorLocator())
     ax.grid(which="major", **GRID_MAJOR)
@@ -449,25 +448,27 @@ def run_plot():
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
 
-    if SHOW_TITLE:
-        ax.set_title(
-            f"DQN memory: on-device vs classic  "
-            f"(obs={obs_dim}, act={n_actions}, replay={capacity})",
-            fontsize=PLOT_FONT_SIZE * 0.6, pad=TITLE_PAD)
+    ax.legend(loc="upper left", ncol=1, frameon=False, handlelength=1.6,
+              borderaxespad=0.6, fontsize=PLOT_FONT_SIZE * 0.55)
 
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02),
-              ncol=1, frameon=False, handlelength=1.6,
-              borderaxespad=0.0, fontsize=PLOT_FONT_SIZE * 0.7)
+    # --- tick X: incroci colorati, base ticks filtrati per evitare overlap ---
+    # Deduplica solo incroci praticamente identici (< 1% del range)
+    min_sep = (h_max - h_min) * 0.01
+    deduped = []
+    for xc, c in sorted(crossings, key=lambda p: p[0]):
+        if all(abs(xc - prev) > min_sep for prev, _ in deduped):
+            deduped.append((xc, c))
 
-    # tick X colorati sugli incroci
-    cross_ticks = {int(round(xc)): c for xc, c in crossings}
-    thr = (h_max - h_min) * 0.035
-    auto_ticks = [t for t in ax.get_xticks()
-                  if h_min <= t <= h_max
-                  and all(abs(t - xc) > thr for xc in cross_ticks)]
-    ax.set_xticks(sorted(set(auto_ticks) | set(cross_ticks)))
-    ax.set_xticklabels([str(int(t)) for t in ax.get_xticks()])
+    cross_ticks = {int(round(xc)): c for xc, c in deduped}
+    thr = (h_max - h_min) * 0.10
+    base_ticks = np.linspace(h_min, h_max, 4)
+    auto_ticks = [int(t) for t in base_ticks
+                  if all(abs(t - xc) > thr for xc in cross_ticks)]
+    all_ticks = sorted(set(auto_ticks) | set(cross_ticks.keys()))
+    ax.set_xticks(all_ticks)
+    ax.set_xticklabels([str(t) for t in all_ticks], rotation=70, ha="center")
     for lbl in ax.get_xticklabels():
+        lbl.set_fontsize(PLOT_FONT_SIZE * 0.55)
         val = int(lbl.get_text())
         if val in cross_ticks:
             lbl.set_color(cross_ticks[val])

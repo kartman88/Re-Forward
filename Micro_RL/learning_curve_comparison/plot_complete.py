@@ -114,10 +114,10 @@ Y_MARGIN = 0.05
 # 6. TITOLO, LEGENDA e OUTPUT
 # ------------------------------------------------------------------ #
 TITLE = "On-device vs On-PC training"
-SHOW_TITLE = True
+SHOW_TITLE = False
 TITLE_PAD = 54
 
-LEGEND_NCOL = 2
+LEGEND_NCOL = 1
 LEGEND_Y = 1.02
 
 OUTPUT_BASENAME = "learning_curve_comparison"
@@ -271,9 +271,9 @@ def main():
     if SHOW_TITLE and TITLE:
         ax.set_title(TITLE, pad=TITLE_PAD)
 
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, LEGEND_Y),
-              ncol=LEGEND_NCOL, frameon=False, handlelength=1.6,
-              columnspacing=1.4, borderaxespad=0.0)
+    ax.legend(loc="upper left", ncol=LEGEND_NCOL, frameon=False,
+              handlelength=1.6, columnspacing=1.4, borderaxespad=0.6,
+              fontsize=FONT_SIZE - 4)
 
     fig.tight_layout()
 
