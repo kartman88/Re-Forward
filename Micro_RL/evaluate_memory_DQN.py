@@ -1,4 +1,4 @@
-222#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Memory consumption calculator for tinyRL DQN on STM32H7.
 
@@ -130,35 +130,21 @@ def replay_breakdown(capacity, obs_dim):
 
 
 def activations_breakdown(topology, batch_size):
-    """Memoria delle attivazioni del forward pass che un approccio classico
-    (es. PyTorch / autograd su PC, dove la RAM non e' un vincolo)
-    conserverebbe per fare la backpropagation.
+    """Memoria delle attivazioni che PyTorch autograd conserva per la backprop.
 
-    Il MIO approccio NON le conserva: ricalcola le attivazioni durante il
-    backward, quindi paga 0 byte qui. Un approccio classico invece tiene in
-    memoria, per OGNI sample del batch, l'intero grafo di attivazioni:
-      - l'input del batch (gli stati, obs_dim) -> serve per dW del 1o layer
-      - per ogni layer la pre-attivazione z = W.x + b -> serve per la
-        derivata della funzione di attivazione (ReLU'/tanh') nel backward
-      - per ogni layer l'output post-attivazione a = f(z) -> serve come
-        input del layer successivo:  dW[l] = delta[l] (outer) a[l-1]
-    Tutto materializzato sull'intero batch (batch_size * dim).
+    Il MIO approccio NON le conserva (ricalcola durante il backward): 0 byte.
+    PyTorch salva solo le post-attivazioni (output di ogni layer):
+      - ReLU.backward usa il proprio output a (non l'input z)
+      - Linear.backward usa l'input del layer = output del layer precedente
+        (stesso tensor, nessuna duplicazione)
+      - Gli stati di input sono gia' nel replay buffer: nessun costo extra
+    Tutto materializzato sull'intero batch (batch_size * out_dim per layer).
     """
     items = []
-    n_weights = len(topology) - 1
-    obs_dim = topology[0]
-    # input del batch conservato per la backprop del primo layer
-    items.append((f"  Input del batch (stati, {obs_dim}): batch*{obs_dim}*float",
-                  batch_size * obs_dim * SIZE_FLOAT))
-    for i in range(n_weights):
+    for i in range(len(topology) - 1):
         in_d, out_d = topology[i], topology[i + 1]
-        # pre-attivazione z del layer i, per tutti i sample del batch
-        z = batch_size * out_d * SIZE_FLOAT
-        items.append((f"  Pre-attivazione z layer {i} ({in_d}->{out_d}): "
-                      f"batch*{out_d}*float", z))
-        # output post-attivazione a del layer i, per tutti i sample del batch
         a = batch_size * out_d * SIZE_FLOAT
-        items.append((f"  Output a layer {i} ({in_d}->{out_d}): "
+        items.append((f"  Post-attivazione a layer {i} ({in_d}->{out_d}): "
                       f"batch*{out_d}*float", a))
     return items
 
