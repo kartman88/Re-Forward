@@ -1,112 +1,159 @@
 """
-Memory vs Hidden Size — Re-forward vs Classic (full activations)
-Setup fisso dal tuo caso:
+Memory vs Hidden Size — Re-forward vs Classic (full activations).
+
+Setup fisso:
 - Topologia: d_in -> h -> d_out  (d_in=4, d_out=2)
 - Buffer episodio: T=500 step
 - Tipi: float32=4B, uint32_t=4B, pointer=4B
 - DenseLayer con float** per le matrici (row-pointers inclusi)
 - Ottimizzatore: Adam (W, dW, mW, vW; b, db, mb, vb; e 'out' per layer)
 - CLASSIC = salvataggio pre+post attivazioni per ogni layer a ogni step
+
+================================================================================
+                          PANNELLO DI CONTROLLO
+================================================================================
 """
 
+import os
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
+from matplotlib.ticker import AutoMinorLocator, LogLocator, NullFormatter, ScalarFormatter
 
-# --------------------
-# CONFIG
-# --------------------
-d_in = 4
+# ------------------------------------------------------------------ #
+# 1. PARAMETRI MODELLO
+# ------------------------------------------------------------------ #
+d_in  = 4
 d_out = 2
-T = 500
+T     = 500
 h_min, h_max, h_step = 8, 350, 1
+
 float_bytes = 4
-ptr_bytes = 4
-include_128kb_line = True
-sram_limit_kb = 128
-save_path = "memory_vs_hidden.png"
+ptr_bytes   = 4
 
-# Se gli stati sono contigui (niente row-pointers nello state_buffer), metti True
-use_state_contiguous = False
+use_state_contiguous = False    # True se state_buffer e' contiguo (no row-pointers)
 
-# --------------------
-# FORMULE
-# --------------------
+SRAM_LINES = [                  # linee di riferimento (nome, KB)
+    ("STM32F4 - 128 KB",  128),
+    ("STM32H7 - 1 MB",   1024),
+]
+
+# ------------------------------------------------------------------ #
+# 2. STILE / FIGURA
+# ------------------------------------------------------------------ #
+FIGSIZE    = (8.0, 6.0)
+DPI        = 300
+FONT_FAMILY = ["Times New Roman", "Liberation Serif", "Nimbus Roman", "DejaVu Serif"]
+FONT_SIZE  = 20
+
+COLOR_REFORWARD = "#1B9E77"     # verde acqua - approccio on-device
+COLOR_CLASSIC   = "#6A3D9A"     # viola - backprop classica
+SRAM_COLORS     = ["#9A9A9A", "#6E6E6E"]   # grigio neutro per le linee limite
+
+LINE_WIDTH  = 2.4
+GRID_MAJOR  = dict(lw=0.6, alpha=0.45, color="0.6")
+GRID_MINOR  = dict(lw=0.3, alpha=0.30, color="0.75")
+
+TITLE       = "Memory vs Hidden Size — Re-forward vs Classic"
+SHOW_TITLE  = True
+TITLE_PAD   = 54
+
+LEGEND_Y    = 1.02
+
+OUTPUT_BASENAME  = "memory_vs_hidden"
+SAVE_FORMATS     = ["pdf", "svg", "png"]
+SHOW             = False
+
+# ================================================================== #
+#                       FINE PANNELLO DI CONTROLLO
+# ================================================================== #
+
+
 def model_bytes(h: int) -> int:
-    """
-    Model + optimizer (Adam) + 'out' per layer + row-pointers + piccolo overhead struct.
-    Per topologia d_in -> h -> d_out:
-      sum_inout = d_in*h + h*d_out = h*(d_in + d_out)
-      sum_out   = h + d_out
-    Floats per layer set (Adam): 4*in*out + 5*out
-    Bytes float modello: 4B * (4*sum_inout + 5*sum_out)
-    Row-pointers: 4 matrici 2D (W, dW, mW, vW) * out ptr/layer -> 4B * 4 * sum_out = 16 * sum_out
-    Struct overhead (puntatori in DenseLayer): ~72 B (due layer)
-    """
+    """Model + Adam + out-buffer + row-pointers + struct overhead."""
     sum_inout = h * (d_in + d_out)
-    sum_out = h + d_out
+    sum_out   = h + d_out
+    model_float = float_bytes * (4 * sum_inout * 4 + 5 * sum_out)
+    row_ptr     = 16 * sum_out
+    struct_ovh  = 72
+    return int(model_float + row_ptr + struct_ovh)
 
-    model_float_bytes = float_bytes * (4 * sum_inout * 4 + 5 * sum_out)  # = 4*(4*sum_inout + 5*sum_out)
-    row_ptr_bytes = 16 * sum_out  # (4 matrici) * (out ptr) * (4B)
-    struct_ptr_bytes = 72
-    return int(model_float_bytes + row_ptr_bytes + struct_ptr_bytes)
 
-def buffer_bytes(T: int, d_in: int, contiguous_states: bool) -> int:
-    """
-    Buffer episodio condiviso (re-forward e classic):
-      state_buffer: T * d_in * 4B + (T * 4B se non contiguo)
-      action/reward/advantage: T * 4B ciascuno
-    """
-    base = T * (d_in * float_bytes + 3 * float_bytes)  # s + r + adv; a ≈ 4B
-    row_ptr = 0 if contiguous_states else T * ptr_bytes
+def buffer_bytes(T: int, d_in: int, contiguous: bool) -> int:
+    """Buffer episodio condiviso (state + action + reward + advantage)."""
+    base    = T * (d_in * float_bytes + 3 * float_bytes)
+    row_ptr = 0 if contiguous else T * ptr_bytes
     return int(base + row_ptr)
 
-def activations_bytes_classic_full(h: int, T: int) -> int:
-    """
-    Classic 'full': salvi pre- e post-attivazioni per ciascun layer (hidden + output) ad ogni step.
-      Per L=2: tot neuroni per step = (h + d_out)
-      Floats per step = 2 * (h + d_out)  ->  bytes = 4B * 2 * (h + d_out)
-      Su T step: 4B * 2 * T * (h + d_out) = 8 * T * (h + d_out)
-    """
+
+def activations_bytes_classic(h: int, T: int) -> int:
+    """Attivazioni tenute in memoria dal trainer classico (pre+post per layer, T step)."""
     return int(8 * T * (h + d_out))
 
+
 def workspace_bytes(h: int) -> int:
-    """Workspace piccolo; includiamo 4B * max(h, d_out) per sicurezza."""
     return int(float_bytes * max(h, d_out))
 
-# --------------------
-# CALCOLO E PLOT
-# --------------------
-hs = np.arange(h_min, h_max + 1, h_step)
-buf = buffer_bytes(T, d_in, contiguous_states=use_state_contiguous)
 
-ref_bytes = np.array([model_bytes(h) + buf + workspace_bytes(h) for h in hs])
-cls_bytes = np.array([model_bytes(h) + buf + activations_bytes_classic_full(h, T) for h in hs])
+def main():
+    hs  = np.arange(h_min, h_max + 1, h_step)
+    buf = buffer_bytes(T, d_in, contiguous=use_state_contiguous)
 
-ref_kb = ref_bytes / 1024.0
-cls_kb = cls_bytes / 1024.0
+    ref_kb = np.array([model_bytes(h) + buf + workspace_bytes(h) for h in hs]) / 1024.0
+    cls_kb = np.array([model_bytes(h) + buf + activations_bytes_classic(h, T) for h in hs]) / 1024.0
 
-plt.figure()
-plt.grid(True, which="both", linestyle="--", linewidth=0.7, alpha=0.7)
-plt.yscale("log")
-# Maggior controllo sui tick logaritmici
-# Tick principali (etichette leggibili)
-plt.gca().yaxis.set_major_locator(ticker.LogLocator(base=10.0, subs=[1.0, 2.0, 5.0], numticks=12))
-plt.gca().yaxis.set_major_formatter(ticker.ScalarFormatter())  # numeri normali, non notazione scientifica
+    families = FONT_FAMILY if isinstance(FONT_FAMILY, (list, tuple)) else [FONT_FAMILY]
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": list(families),
+        "font.size": FONT_SIZE,
+        "mathtext.fontset": "stix",
+        "axes.linewidth": 0.8,
+        "svg.fonttype": "none",
+    })
 
-# Tick minori (senza etichetta, solo griglia)
-plt.gca().yaxis.set_minor_locator(ticker.LogLocator(base=10.0, subs=np.arange(1.0, 10.0)*0.1, numticks=10))
-plt.gca().yaxis.set_minor_formatter(ticker.NullFormatter())
-plt.plot(hs, ref_kb, label="Re-forward", color="darkgreen")
-plt.plot(hs, cls_kb, label="Classic", color="red")
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
 
-if include_128kb_line:
-    plt.axhline(sram_limit_kb, linestyle=":", label=f"{sram_limit_kb} KB SRAM", color="blue")
+    ax.plot(hs, cls_kb, color=COLOR_CLASSIC,   lw=LINE_WIDTH, solid_capstyle="round",
+            zorder=4, label="Classic backprop")
+    ax.plot(hs, ref_kb, color=COLOR_REFORWARD, lw=LINE_WIDTH, solid_capstyle="round",
+            zorder=4, label="Re-forward (on-device)")
 
-plt.xlabel("Hidden layer size")
-plt.ylabel("Memory (KB)")
-plt.title(f"Memory vs Hidden Size — Re-forward vs Classic")
-plt.legend()
-plt.tight_layout()
-plt.savefig(save_path, dpi=200)
-print(f"Saved plot to {save_path}")
+    for (name, limit_kb), c in zip(SRAM_LINES, SRAM_COLORS):
+        ax.axhline(limit_kb, linestyle="--", color=c, linewidth=1.2, zorder=2)
+        ax.text(h_max, limit_kb, f" {name}", va="center", ha="left",
+                fontsize=FONT_SIZE * 0.55, color=c)
+
+    ax.set_xlabel("Hidden layer size (units)")
+    ax.set_ylabel("Memory (KB)")
+    ax.set_xlim(h_min, h_max)
+    ax.set_ylim(bottom=0)
+
+    ax.yaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(which="major", **GRID_MAJOR)
+    ax.grid(which="minor", axis="y", **GRID_MINOR)
+    ax.set_axisbelow(True)
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
+    if SHOW_TITLE:
+        ax.set_title(TITLE, pad=TITLE_PAD)
+
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, LEGEND_Y),
+              ncol=2, frameon=False, handlelength=1.6,
+              columnspacing=1.4, borderaxespad=0.0)
+
+    fig.tight_layout()
+
+    out_dir = os.path.dirname(os.path.abspath(__file__))
+    for fmt in SAVE_FORMATS:
+        out = os.path.join(out_dir, f"{OUTPUT_BASENAME}.{fmt}")
+        fig.savefig(out, format=fmt, bbox_inches="tight", dpi=DPI)
+        print(f"[=] salvato {out}")
+
+    if SHOW:
+        plt.show()
+
+
+if __name__ == "__main__":
+    main()

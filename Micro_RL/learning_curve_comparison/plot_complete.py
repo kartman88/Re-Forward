@@ -1,141 +1,290 @@
-#!/usr/bin/env python3
-# Plot di due gruppi di curve: MCU (verde) e PC (rosso) con media ± 95% CI.
+"""
+Learning-curve comparison: on-MCU training vs on-PC training.
 
-from pathlib import Path
+Confronta le learning curve di 10 esperimenti (run) per ciascun gruppo,
+mostrando la media e una banda di incertezza (deviazione standard di default).
+
+Linee guida grafiche seguite (vedi PLOT_INSTRUCTION.md):
+  - dimensioni/aspect-ratio fissi e DPI alto, output vettoriale (PDF/SVG)
+  - limiti degli assi controllati manualmente (zoom centrato sui dati)
+  - tipografia formale (Times New Roman) e testo grande
+  - griglia maggiore/minore sottile e trasparente
+  - palette di colori personalizzabile, una tinta per curva
+  - legenda compatta fuori dalla tela, senza bordo
+
+================================================================================
+                          PANNELLO DI CONTROLLO
+        (modifica solo questa sezione per fare tuning del grafico)
+================================================================================
+"""
+
+import os
+
 import numpy as np
-import pandas as pd
-import matplotlib
-# Se sei su server/headless, sblocca la riga sotto:
-# matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
 
-# ====== CONFIG ======
-FOLDER = Path("./")          # cartella con i CSV
-N_FILES = 10                 # numero di run attese per ciascun gruppo
-START_EPISODE = 1
-MAX_EPISODE = 150
-OUTPUT_IMG = "learning_curve_mcu_vs_pc.png"
-TITLE = "Learning Curves (MCU vs PC): Mean ± 95% CI"
-PLOT_INDIVIDUALS = False     # True per vedere tutte le run in trasparenza
-# Colori & etichette
-MCU_LABEL = "MCU Mean reward"
-MCU_COLOR = "darkgreen"
-PC_LABEL  = "PC Mean reward"
-PC_COLOR  = "red"
-# ====================
+# ------------------------------------------------------------------ #
+# 1. DATI: quali run caricare e come sono fatti i CSV
+# ------------------------------------------------------------------ #
+DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    cols_lower = {c: c.lower() for c in df.columns}
-    df = df.rename(columns=cols_lower)
-    if 'episode' not in df.columns:
-        for alt in ('episodes','ep','iter','iteration'):
-            if alt in df.columns:
-                df = df.rename(columns={alt: 'episode'})
-                break
-    if 'reward' not in df.columns:
-        for alt in ('return','returns','rew','score'):
-            if alt in df.columns:
-                df = df.rename(columns={alt: 'reward'})
-                break
-    if not {'episode','reward'}.issubset(df.columns):
-        raise ValueError("Servono colonne 'episode' e 'reward'.")
-    return df[['episode','reward']]
+# Per ogni curva: etichetta in legenda, pattern dei file e nomi colonne.
+CURVES = {
+    "PC (DQN)": {
+        "pattern": "pc_learning_curve{i}.csv",
+        "reward_col": "reward",
+        "step_col": None,
+        "cumstep_col": None,
+    },
+    "MCU (on-device)": {
+        "pattern": "learning_curve{i}.csv",
+        "reward_col": "reward",
+        "step_col": None,
+        "cumstep_col": None,
+    },
+}
 
-def load_run(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    df = normalize_columns(df)
-    df['episode'] = pd.to_numeric(df['episode'], errors='coerce').astype('Int64')
-    df['reward']  = pd.to_numeric(df['reward'],  errors='coerce')
-    df = df.dropna(subset=['episode'])
-    df = df[(df['episode'] >= START_EPISODE) & (df['episode'] <= MAX_EPISODE)]
-    return df.set_index('episode').sort_index()
+RUN_IDS = list(range(1, 11))            # i 10 esperimenti: 1..10
 
-def load_group(prefix: str) -> pd.DataFrame:
-    """Carica un gruppo di run con pattern <prefix>{1..N_FILES}.csv e restituisce
-    una matrice [episodes, n_runs] con colonne run_1..run_k."""
-    idx = pd.Index(range(START_EPISODE, MAX_EPISODE + 1), name='episode')
-    cols = []
-    for i in range(1, N_FILES + 1):
-        p = FOLDER / f"{prefix}{i}.csv"
-        if not p.exists():
-            print(f"[AVVISO] File mancante: {p.name} (gruppo {prefix})")
-            continue
-        s = load_run(p).reindex(idx)['reward'].rename(f"run_{i}")
-        cols.append(s)
-    if not cols:
-        raise SystemExit(f"Nessun file valido per prefisso '{prefix}'")
-    return pd.concat(cols, axis=1)
+# ------------------------------------------------------------------ #
+# 2. ASSE X e AGGREGAZIONE delle run
+# ------------------------------------------------------------------ #
+# "episode"  -> X = numero di episodio
+# "samples"  -> X = step di ambiente cumulativi (sample efficiency)
+X_AXIS = "episode"
 
-def t_critical_array(n_arr: np.ndarray) -> np.ndarray:
-    """Restituisce t_{0.975, n-1} per ogni n (IC 95%). Usa 1.96 per n>=30."""
-    t_map = {
-        1: np.nan, 2: 12.706, 3: 4.303, 4: 3.182, 5: 2.776, 6: 2.571, 7: 2.447,
-        8: 2.365, 9: 2.306, 10: 2.262, 11: 2.228, 12: 2.201, 13: 2.179, 14: 2.160,
-        15: 2.145, 16: 2.131, 17: 2.120, 18: 2.110, 19: 2.101, 20: 2.093,
-        21: 2.086, 22: 2.080, 23: 2.074, 24: 2.069, 25: 2.064, 26: 2.060,
-        27: 2.056, 28: 2.052, 29: 2.048
-    }
-    out = np.empty_like(n_arr, dtype=float)
-    for i, k in enumerate(n_arr):
-        if k >= 30:
-            out[i] = 1.96
-        elif k >= 2:
-            out[i] = t_map[int(k)]
+X_LABEL = {
+    "episode": "Episode",
+    "samples": "Environment steps",
+}[X_AXIS]
+Y_LABEL = "Episode reward"
+
+# Numero di punti della griglia comune su cui interpolare tutte le run
+N_GRID = 400
+
+# Estremo destro dell'asse X usato per l'aggregazione.
+#   None -> usa il minimo tra i massimi delle run (tutte le run coprono il range)
+X_MAX = None
+
+# Forza lo STESSO intervallo X per TUTTE le curve.
+MATCH_X_RANGE = True
+
+# Tipo di banda di incertezza attorno alla media:
+#   "std" -> deviazione standard, "sem" -> errore standard,
+#   "pct" -> intervallo percentile (vedi PCT_LO/PCT_HI)
+BAND = "std"
+BAND_SCALE = 1.0
+PCT_LO, PCT_HI = 25, 75
+
+# ------------------------------------------------------------------ #
+# 3. SMOOTHING
+# ------------------------------------------------------------------ #
+SMOOTH = True
+SMOOTH_WINDOW = 21
+
+# ------------------------------------------------------------------ #
+# 4. COLORI
+# ------------------------------------------------------------------ #
+PALETTE = {
+    "PC (DQN)":         "#6A3D9A",      # viola
+    "MCU (on-device)":  "#1B9E77",      # verde acqua
+}
+LINE_ALPHA = 1.0
+BAND_ALPHA = 0.18
+
+# ------------------------------------------------------------------ #
+# 5. STILE LINEE / GRIGLIA / FIGURA
+# ------------------------------------------------------------------ #
+LINE_WIDTH = 2.4
+FIGSIZE = (8.0, 6.0)
+DPI = 300
+
+FONT_FAMILY = ["Times New Roman", "Liberation Serif", "Nimbus Roman", "DejaVu Serif"]
+FONT_SIZE = 20
+
+GRID_MAJOR = dict(lw=0.6, alpha=0.45, color="0.6")
+GRID_MINOR = dict(lw=0.3, alpha=0.30, color="0.75")
+
+XLIM = None
+YLIM = None
+Y_MARGIN = 0.05
+
+# ------------------------------------------------------------------ #
+# 6. TITOLO, LEGENDA e OUTPUT
+# ------------------------------------------------------------------ #
+TITLE = "On-device vs On-PC training"
+SHOW_TITLE = True
+TITLE_PAD = 54
+
+LEGEND_NCOL = 2
+LEGEND_Y = 1.02
+
+OUTPUT_BASENAME = "learning_curve_comparison"
+SAVE_FORMATS = ["pdf", "svg", "png"]
+SHOW = False
+
+# ================================================================== #
+#                       FINE PANNELLO DI CONTROLLO
+# ================================================================== #
+
+
+def _rolling(arr: np.ndarray, window: int) -> np.ndarray:
+    """Rolling-mean centrata con finestra che si accorcia ai bordi (no NaN)."""
+    if not SMOOTH or window <= 1:
+        return arr
+    n = len(arr)
+    half = window // 2
+    csum = np.concatenate(([0.0], np.cumsum(arr, dtype=float)))
+    idx = np.arange(n)
+    lo = np.maximum(0, idx - half)
+    hi = np.minimum(n, idx + half + 1)
+    return (csum[hi] - csum[lo]) / (hi - lo)
+
+
+def _read_csv(path: str) -> dict:
+    """Legge un CSV con header e restituisce {colonna: ndarray float}."""
+    with open(path) as fh:
+        header = fh.readline().strip().split(",")
+    data = np.genfromtxt(path, delimiter=",", skip_header=1, dtype=float)
+    data = np.atleast_2d(data)
+    return {name: data[:, j] for j, name in enumerate(header)}
+
+
+def load_run(path: str, cfg: dict):
+    """Restituisce (x, reward_smoothed) per una singola run, secondo X_AXIS."""
+    df = _read_csv(path)
+    reward = _rolling(np.asarray(df[cfg["reward_col"]], dtype=float), SMOOTH_WINDOW)
+
+    if X_AXIS == "episode":
+        x = np.arange(1, len(reward) + 1, dtype=float)
+    else:  # "samples"
+        if cfg["cumstep_col"] and cfg["cumstep_col"] in df:
+            x = np.asarray(df[cfg["cumstep_col"]], dtype=float)
+        elif cfg["step_col"] and cfg["step_col"] in df:
+            x = np.cumsum(np.asarray(df[cfg["step_col"]], dtype=float))
         else:
-            out[i] = np.nan
-    return out
+            raise ValueError(f"Nessuna colonna di step in {path} per X_AXIS='samples'")
+    return x, reward
 
-def summarize(M: pd.DataFrame):
-    """Dato M [episodes, n_runs], calcola mean, lower, upper dell'IC 95%."""
-    mean = M.mean(axis=1)
-    std  = M.std(axis=1, ddof=1)
-    n    = M.count(axis=1)
-    tcrit = t_critical_array(n.to_numpy())
-    se = std / np.sqrt(n)
-    hw = tcrit * se
-    lower = mean - hw
-    upper = mean + hw
-    return mean, lower, upper, M
+
+def run_bounds(runs):
+    """(x_min, x_max) coperti da TUTTE le run del gruppo (intersezione)."""
+    return max(r[0][0] for r in runs), min(r[0][-1] for r in runs)
+
+
+def aggregate(runs, x_min, x_max):
+    """Interpola le run su una griglia comune e calcola media + banda."""
+    grid = np.linspace(x_min, x_max, N_GRID)
+    stacked = np.vstack([np.interp(grid, x, y) for x, y in runs])
+    mean = stacked.mean(axis=0)
+
+    if BAND == "std":
+        spread = stacked.std(axis=0) * BAND_SCALE
+        lo, hi = mean - spread, mean + spread
+    elif BAND == "sem":
+        spread = stacked.std(axis=0) / np.sqrt(stacked.shape[0]) * BAND_SCALE
+        lo, hi = mean - spread, mean + spread
+    elif BAND == "pct":
+        lo = np.percentile(stacked, PCT_LO, axis=0)
+        hi = np.percentile(stacked, PCT_HI, axis=0)
+    else:
+        raise ValueError(f"BAND sconosciuto: {BAND!r}")
+    return grid, mean, lo, hi
+
 
 def main():
-    # Carica i due gruppi
-    M_mcu = load_group("learning_curve")
-    M_pc  = load_group("pc_learning_curve")
+    families = FONT_FAMILY if isinstance(FONT_FAMILY, (list, tuple)) else [FONT_FAMILY]
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": list(families),
+        "font.size": FONT_SIZE,
+        "mathtext.fontset": "stix",
+        "axes.linewidth": 0.8,
+        "svg.fonttype": "none",
+    })
 
-    mean_mcu, low_mcu, up_mcu, M1 = summarize(M_mcu)
-    mean_pc,  low_pc,  up_pc,  M2 = summarize(M_pc)
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
 
-    x = mean_mcu.index.to_numpy()
+    # ---- 1a passata: carica tutte le run e calcola i limiti X ----
+    loaded = {}
+    for label, cfg in CURVES.items():
+        runs = []
+        for i in RUN_IDS:
+            path = os.path.join(DATA_DIR, cfg["pattern"].format(i=i))
+            if os.path.exists(path):
+                runs.append(load_run(path, cfg))
+        if not runs:
+            print(f"[!] Nessun file trovato per '{label}' ({cfg['pattern']})")
+            continue
+        loaded[label] = runs
+        print(f"[+] '{label}': {len(runs)} run caricate")
 
-    plt.figure(figsize=(10, 5.5))
+    bounds = {lbl: run_bounds(runs) for lbl, runs in loaded.items()}
+    if MATCH_X_RANGE:
+        shared_min = max(b[0] for b in bounds.values())
+        shared_max = min(b[1] for b in bounds.values())
+        if X_MAX is not None:
+            shared_max = min(shared_max, X_MAX)
+        print(f"[i] range X condiviso: [{shared_min:.0f}, {shared_max:.0f}]")
 
-    if PLOT_INDIVIDUALS:
-        for col in M1.columns:
-            plt.plot(x, M1[col].to_numpy(), alpha=0.15, linewidth=1, color=MCU_COLOR)
-        for col in M2.columns:
-            plt.plot(x, M2[col].to_numpy(), alpha=0.15, linewidth=1, color=PC_COLOR)
+    # ---- 2a passata: aggrega e disegna ----
+    for z, label in enumerate(loaded):
+        runs = loaded[label]
+        if MATCH_X_RANGE:
+            x_min, x_max = shared_min, shared_max
+        else:
+            x_min, x_max = bounds[label]
+            if X_MAX is not None:
+                x_max = min(x_max, X_MAX)
 
-    # MCU (verde)
-    plt.plot(x, mean_mcu.to_numpy(), color=MCU_COLOR, linewidth=2, label=MCU_LABEL)
-    mask1 = ~np.isnan(low_mcu.to_numpy()) & ~np.isnan(up_mcu.to_numpy())
-    plt.fill_between(x[mask1], low_mcu.to_numpy()[mask1], up_mcu.to_numpy()[mask1],
-                     alpha=0.18, label="MCU 95% CI", color=MCU_COLOR)
+        grid, mean, lo, hi = aggregate(runs, x_min, x_max)
+        color = PALETTE.get(label, None)
 
-    # PC (rosso)
-    plt.plot(x, mean_pc.to_numpy(), color=PC_COLOR, linewidth=2, label=PC_LABEL)
-    mask2 = ~np.isnan(low_pc.to_numpy()) & ~np.isnan(up_pc.to_numpy())
-    #plt.fill_between(x[mask2], low_pc.to_numpy()[mask2], up_pc.to_numpy()[mask2],alpha=0.18, label="PC 95% CI", color=PC_COLOR)
+        ax.fill_between(grid, lo, hi, color=color, alpha=BAND_ALPHA,
+                        linewidth=0, zorder=2 + 2 * z)
+        ax.plot(grid, mean, color=color, lw=LINE_WIDTH, alpha=LINE_ALPHA,
+                label=label, zorder=3 + 2 * z, solid_capstyle="round")
 
-    plt.xlabel("Episode", fontsize=14)
-    plt.ylabel("Reward", fontsize=14)
-    plt.title(TITLE)
-    plt.xlim(START_EPISODE, MAX_EPISODE)
-    plt.grid(True, linestyle="--", alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(OUTPUT_IMG, dpi=150)
-    print(f"[OK] Salvato: {OUTPUT_IMG}")
-    plt.show()
+    # ---- assi, griglia, limiti ----
+    ax.set_xlabel(X_LABEL)
+    ax.set_ylabel(Y_LABEL)
+
+    ax.xaxis.set_minor_locator(AutoMinorLocator())
+    ax.yaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(which="major", **GRID_MAJOR)
+    ax.grid(which="minor", **GRID_MINOR)
+    ax.set_axisbelow(True)
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
+    if XLIM is not None:
+        ax.set_xlim(*XLIM)
+    if YLIM is not None:
+        ax.set_ylim(*YLIM)
+    else:
+        y0, y1 = ax.get_ylim()
+        pad = (y1 - y0) * Y_MARGIN
+        ax.set_ylim(y0 - pad, y1 + pad)
+
+    if SHOW_TITLE and TITLE:
+        ax.set_title(TITLE, pad=TITLE_PAD)
+
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, LEGEND_Y),
+              ncol=LEGEND_NCOL, frameon=False, handlelength=1.6,
+              columnspacing=1.4, borderaxespad=0.0)
+
+    fig.tight_layout()
+
+    for fmt in SAVE_FORMATS:
+        out = os.path.join(DATA_DIR, f"{OUTPUT_BASENAME}.{fmt}")
+        fig.savefig(out, format=fmt, bbox_inches="tight", dpi=DPI)
+        print(f"[=] salvato {out}")
+
+    if SHOW:
+        plt.show()
+
 
 if __name__ == "__main__":
     main()
