@@ -11,6 +11,7 @@ Due modalita' d'uso:
 """
 
 import argparse
+import os
 
 # Tipi sul target ARM Cortex-M (STM32H7, 32-bit)
 SIZE_FLOAT  = 4
@@ -200,12 +201,51 @@ def memory_totals(hidden, obs_dim, n_act_dims, T, batch_size, depth=1):
     return mine, classic
 
 
+# ===================================================================== #
+#         PANNELLO GRAFICO (stile scientifico, vedi PLOT_INSTRUCTION.md)
+#            modifica queste variabili per il tuning del grafico
+# ===================================================================== #
+PLOT_FIGSIZE   = (8.0, 6.0)            # pollici, aspect-ratio bloccato
+PLOT_DPI       = 300                   # alta risoluzione (no immagini sgranate)
+# catena di font serif: il primo disponibile vince (Times -> sostituti metric-compat.)
+PLOT_FONT      = ["Times New Roman", "Liberation Serif", "Nimbus Roman", "DejaVu Serif"]
+PLOT_FONT_SIZE = 20                    # testo grande (verra' rimpicciolito nel paper)
+# formati di salvataggio: vettoriale (PDF/SVG) + anteprima raster (PNG)
+PLOT_SAVE_FORMATS = ["pdf", "svg", "png"]
+
+# Palette minimalista: una tinta per curva (viola / verde-acqua).
+COLOR_MINE     = "#1B9E77"             # verde acqua - approccio on-device
+COLOR_CLASSIC  = "#6A3D9A"             # viola - backprop classica
+# Linee di riferimento (limiti RAM schede) in grigio neutro, tonalita' diverse.
+BOARD_COLORS   = ["#9A9A9A", "#6E6E6E", "#3F3F3F"]
+
+PLOT_LINE_WIDTH = 2.4                  # spessore curve principali
+MARKER_SIZE     = 8                    # marker sugli incroci curva-limite
+GRID_MAJOR      = dict(lw=0.6, alpha=0.45, color="0.6")
+GRID_MINOR      = dict(lw=0.3, alpha=0.30, color="0.75")
+TITLE_PAD       = 54                   # spazio titolo-grafico (lascia posto alla legenda)
+SHOW_TITLE      = True
+
+
 def run_plot(args):
     import numpy as np
     import matplotlib
     if args.out:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import AutoMinorLocator
+
+    families = PLOT_FONT if isinstance(PLOT_FONT, (list, tuple)) else [PLOT_FONT]
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": list(families),
+        "font.size": PLOT_FONT_SIZE,
+        "xtick.labelsize": PLOT_FONT_SIZE * 0.6,   # tick piu' piccoli delle label assi
+        "ytick.labelsize": PLOT_FONT_SIZE * 0.6,   # (qui i tick X marcano gli incroci)
+        "mathtext.fontset": "stix",
+        "axes.linewidth": 0.8,
+        "svg.fonttype": "none",        # mantieni il testo editabile in SVG
+    })
 
     hiddens = np.unique(np.linspace(args.hmin, args.hmax, args.points).astype(int))
     mine_kb, classic_kb = [], []
@@ -215,47 +255,67 @@ def run_plot(args):
         mine_kb.append(mine / 1024.0)
         classic_kb.append(classic / 1024.0)
 
-    plt.figure(figsize=(10, 6))
-    plt.plot(hiddens, classic_kb, color="red", linewidth=2,
-             label=f"Backprop classica (autograd, minibatch={args.batch})")
-    plt.plot(hiddens, mine_kb, color="darkgreen", linewidth=2,
-             label="Mio approccio (on-device, 1 campione)")
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
 
-    colors = ["#888888", "#1f77b4", "#9467bd"]
-    for (name, limit_kb), c in zip(BOARDS, colors):
-        plt.axhline(limit_kb, linestyle="--", color=c, linewidth=1.5)
-        plt.text(args.hmax, limit_kb, f" {name}", va="center", ha="left",
-                 fontsize=9, color=c)
+    # curve principali in primo piano (z-order alto)
+    ax.plot(hiddens, classic_kb, color=COLOR_CLASSIC, lw=PLOT_LINE_WIDTH,
+            solid_capstyle="round", zorder=6,
+            label=f"Backprop classica (minibatch={args.batch})")
+    ax.plot(hiddens, mine_kb, color=COLOR_MINE, lw=PLOT_LINE_WIDTH,
+            solid_capstyle="round", zorder=6,
+            label="Mio approccio (on-device, 1 campione)")
+
+    # linee-limite delle schede: grigio neutro, sullo sfondo (z-order basso)
+    for (name, limit_kb), c in zip(BOARDS, BOARD_COLORS):
+        ax.axhline(limit_kb, linestyle="--", color=c, linewidth=1.2, zorder=2)
+        ax.text(args.hmax, limit_kb, f" {name}", va="center", ha="left",
+                fontsize=PLOT_FONT_SIZE * 0.55, color=c)
 
     # Incroci curva-limite: marker sul punto + linea verticale tratteggiata fino
     # all'asse X col valore esatto di H. I valori sono monotoni crescenti in H,
     # quindi np.interp inverte y->x. Niente incrocio se il limite e' sotto il
     # consumo minimo (es. il rollout buffer supera gia' i 128 KB della F406).
     crossings = []  # (x_cross, color) per ogni incrocio curva-limite
-    for ys, curve_color in [(np.array(mine_kb), "darkgreen"),
-                            (np.array(classic_kb), "red")]:
-        for (_, limit_kb), c in zip(BOARDS, colors):
+    for ys, curve_color in [(np.array(mine_kb), COLOR_MINE),
+                            (np.array(classic_kb), COLOR_CLASSIC)]:
+        for (_, limit_kb), c in zip(BOARDS, BOARD_COLORS):
             if ys[0] <= limit_kb <= ys[-1]:
                 x_cross = float(np.interp(limit_kb, ys, hiddens))
-                plt.plot([x_cross], [limit_kb], "o", color=curve_color,
-                         markersize=7, zorder=5)
-                plt.vlines(x_cross, 0, limit_kb, color=curve_color,
-                           linestyle=":", linewidth=1.3, alpha=0.8, zorder=4)
+                ax.plot([x_cross], [limit_kb], "o", color=curve_color,
+                        markersize=MARKER_SIZE, zorder=7)
+                ax.vlines(x_cross, 0, limit_kb, color=curve_color,
+                          linestyle=":", linewidth=1.3, alpha=0.8, zorder=5)
                 crossings.append((x_cross, curve_color))
 
-    plt.xlabel("Dimensione hidden layer (unita')", fontsize=13)
-    plt.ylabel("Consumo memoria (KB)", fontsize=13)
-    plt.title(f"Memoria PPO vs backprop classica  "
-              f"(obs={args.obs}, act={args.act}, depth={args.depth}, "
-              f"rollout={args.rollout})")
-    plt.xlim(args.hmin, args.hmax)
-    plt.ylim(bottom=0)
-    plt.grid(True, linestyle="--", alpha=0.3)
-    plt.legend(loc="upper left")
+    ax.set_xlabel("Dimensione hidden layer (unita')")
+    ax.set_ylabel("Consumo memoria (KB)")
+    ax.set_xlim(args.hmin, args.hmax)
+    ax.set_ylim(bottom=0)
+
+    # griglia maggiore + minore, sottile e trasparente, dietro ai dati.
+    # Solo l'asse Y usa i minor tick automatici: sull'asse X i tick sono
+    # personalizzati (segnano gli incroci) e una spaziatura irregolare manderebbe
+    # in tilt AutoMinorLocator.
+    ax.yaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(which="major", **GRID_MAJOR)
+    ax.grid(which="minor", axis="y", **GRID_MINOR)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
+    if SHOW_TITLE:
+        ax.set_title(f"Memoria PPO vs backprop classica  "
+                     f"(obs={args.obs}, act={args.act}, depth={args.depth}, "
+                     f"rollout={args.rollout})",
+                     fontsize=PLOT_FONT_SIZE * 0.6, pad=TITLE_PAD)
+
+    # legenda compatta, fuori dalla tela (sopra), senza bordo
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=1,
+              frameon=False, handlelength=1.6, borderaxespad=0.0,
+              fontsize=PLOT_FONT_SIZE * 0.7)
 
     # Valori di H degli incroci come tick sull'asse X. I tick automatici troppo
     # vicini vengono rimossi per fare spazio senza sovrapporre le etichette.
-    ax = plt.gca()
     cross_ticks = {int(round(xc)): color for xc, color in crossings}
     thr = (args.hmax - args.hmin) * 0.035
     auto_ticks = [t for t in ax.get_xticks()
@@ -269,11 +329,14 @@ def run_plot(args):
             lbl.set_color(cross_ticks[val])
             lbl.set_fontweight("bold")
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     if args.out:
-        plt.savefig(args.out, dpi=150)
-        print(f"[OK] Grafico salvato in {args.out}")
+        base = os.path.splitext(args.out)[0]
+        for fmt in PLOT_SAVE_FORMATS:
+            out = f"{base}.{fmt}"
+            fig.savefig(out, format=fmt, bbox_inches="tight", dpi=PLOT_DPI)
+            print(f"[OK] Grafico salvato in {out}")
     else:
         plt.show()
 
