@@ -313,6 +313,27 @@ def run_report():
 
 MCU_LIMIT_BYTES = 1024 * 1024  # 1 MB (limite RAM del microcontrollore)
 
+# ===================================================================== #
+#   PANNELLO GRAFICO (stile scientifico, vedi PLOT_INSTRUCTION.md)
+# ===================================================================== #
+PLOT_FIGSIZE    = (8.0, 6.0)
+PLOT_DPI        = 300
+PLOT_FONT       = ["Times New Roman", "Liberation Serif", "Nimbus Roman", "DejaVu Serif"]
+PLOT_FONT_SIZE  = 20
+PLOT_FORMATS    = ["pdf", "svg", "png"]
+
+COLOR_MINE      = "#1B9E77"     # verde acqua - approccio on-device
+COLOR_CLASSIC   = "#6A3D9A"     # viola       - backprop classica
+COLOR_LIMIT     = "#9A9A9A"     # grigio neutro per la linea limite MCU
+
+PLOT_LINE_WIDTH = 2.4
+PLOT_BAND_ALPHA = 0.12          # riempimento tra le due curve
+GRID_MAJOR      = dict(lw=0.6, alpha=0.45, color="0.6")
+GRID_MINOR      = dict(lw=0.3, alpha=0.30, color="0.75")
+SHOW_TITLE      = True
+TITLE_PAD       = 54
+# ===================================================================== #
+
 
 def run_plot():
     """Modalita' 2: fissa i parametri dell'esperimento, varia la dimensione
@@ -329,6 +350,7 @@ def run_plot():
     try:
         import matplotlib.pyplot as plt
         import numpy as np
+        from matplotlib.ticker import AutoMinorLocator
     except ImportError:
         print("\n[!] matplotlib/numpy non installati. Installa con:")
         print("    pip install matplotlib numpy\n")
@@ -341,88 +363,125 @@ def run_plot():
 
     obs_dim    = ask_int("obs_dim (input layer)", 3)
     n_actions  = ask_int("n_actions (output layer)", 5)
-    capacity   = ask_int("Capacità del replay buffer (REPLAY_SIZE)", 1000)
+    capacity   = ask_int("Capacita' del replay buffer (REPLAY_SIZE)", 1000)
     batch_size = ask_int("Batch size", 64)
     h_min      = ask_int("Larghezza hidden minima", 8)
     h_max      = ask_int("Larghezza hidden massima", 6000)
-    n_points   = ask_int("Numero di punti sull'asse X", 40)
+    n_points   = ask_int("Numero di punti sull'asse X", 200)
 
-    widths = [int(round(w)) for w in
-              np.linspace(h_min, h_max, max(2, n_points))]
-    widths = sorted(set(max(1, w) for w in widths))
+    widths = np.unique(np.linspace(h_min, h_max, max(2, n_points)).astype(int))
 
     mine_kb, classic_kb = [], []
     for w in widths:
-        topo = [obs_dim, w, n_actions]
-        t = compute_totals(topo, capacity, obs_dim, batch_size)
-        mine_kb.append(t["mine"] / 1024)
-        classic_kb.append(t["classic"] / 1024)
+        t = compute_totals([obs_dim, int(w), n_actions], capacity, obs_dim,
+                           batch_size)
+        mine_kb.append(t["mine"] / 1024.0)
+        classic_kb.append(t["classic"] / 1024.0)
 
-    limit_kb = MCU_LIMIT_BYTES / 1024
+    mine_kb    = np.array(mine_kb)
+    classic_kb = np.array(classic_kb)
+    limit_kb   = MCU_LIMIT_BYTES / 1024.0
 
     # --- stampa di riepilogo testuale ---
-    print(f"\n{'hidden':>8}{'mio (KB)':>14}{'classico (KB)':>16}"
-          f"{'extra %':>10}")
+    print(f"\n{'hidden':>8}{'mio (KB)':>14}{'classico (KB)':>16}{'extra %':>10}")
     print("-" * 48)
     for w, m, c in zip(widths, mine_kb, classic_kb):
         pct = (c - m) / m * 100 if m else 0.0
         print(f"{w:>8}{m:>14.1f}{c:>16.1f}{pct:>9.1f}%")
 
-    # --- grafico ---
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(widths, mine_kb, "-o", color="#2ca02c", markersize=4,
-            label="Mio approccio (ricalcolo attivazioni)")
-    ax.plot(widths, classic_kb, "-s", color="#d62728", markersize=4,
-            label="Approccio classico (PyTorch-like, attivazioni conservate)")
-    ax.fill_between(widths, mine_kb, classic_kb, color="#d62728", alpha=0.10,
-                    label="Memoria risparmiata")
-    ax.axhline(limit_kb, color="black", linestyle="--", linewidth=1.5,
-               label=f"Limite MCU = {limit_kb/1024:.0f} MB")
+    # --- impostazioni grafiche ---
+    families = PLOT_FONT if isinstance(PLOT_FONT, (list, tuple)) else [PLOT_FONT]
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": list(families),
+        "font.size": PLOT_FONT_SIZE,
+        "xtick.labelsize": PLOT_FONT_SIZE * 0.6,
+        "ytick.labelsize": PLOT_FONT_SIZE * 0.6,
+        "mathtext.fontset": "stix",
+        "axes.linewidth": 0.8,
+        "svg.fonttype": "none",
+    })
 
-    # --- punti di incrocio con il limite di memoria ---
-    def crossing(xs, ys, y_target):
-        """Larghezza (interpolata) alla quale la curva supera y_target.
-        Ritorna None se la curva non raggiunge mai il limite nel range."""
-        for i in range(1, len(ys)):
-            if (ys[i - 1] - y_target) * (ys[i] - y_target) <= 0 \
-                    and ys[i] != ys[i - 1]:
-                frac = (y_target - ys[i - 1]) / (ys[i] - ys[i - 1])
-                return xs[i - 1] + frac * (xs[i] - xs[i - 1])
-        return None
+    fig, ax = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
 
-    for xs_ys, color, name in (
-            ((widths, mine_kb), "#2ca02c", "mio"),
-            ((widths, classic_kb), "#d62728", "classico")):
-        xc = crossing(xs_ys[0], xs_ys[1], limit_kb)
-        if xc is None:
-            print(f"  [i] L'approccio {name} non raggiunge il limite di "
-                  f"1 MB nel range scelto.")
-            continue
-        ax.plot([xc], [limit_kb], "o", color=color, markersize=10,
-                markeredgecolor="black", zorder=5)
-        # tick/etichetta del valore X colorato sotto l'asse
-        ax.annotate(f"{xc:.0f}", xy=(xc, limit_kb),
-                    xytext=(xc, -0.06), textcoords=("data", "axes fraction"),
-                    ha="center", va="top", color=color, fontweight="bold",
-                    annotation_clip=False)
-        ax.vlines(xc, 0, limit_kb, color=color, linestyle=":", linewidth=1,
-                  alpha=0.7)
-        print(f"  >>> {name}: supera 1 MB a hidden width ~ {xc:.0f}")
+    # curve principali
+    ax.plot(widths, classic_kb, color=COLOR_CLASSIC, lw=PLOT_LINE_WIDTH,
+            solid_capstyle="round", zorder=5,
+            label=f"Classic backprop (batch={batch_size})")
+    ax.plot(widths, mine_kb, color=COLOR_MINE, lw=PLOT_LINE_WIDTH,
+            solid_capstyle="round", zorder=5,
+            label="Re-forward (on-device, 1 sample)")
 
-    ax.set_xlabel("Larghezza hidden layer")
-    ax.set_ylabel("Consumo di memoria [KB]")
-    ax.set_title(f"Consumo di memoria DQN — 1 hidden layer\n"
-                 f"obs={obs_dim}, actions={n_actions}, "
-                 f"replay={capacity}, batch={batch_size}")
-    ax.legend(loc="upper left")
-    ax.grid(True, alpha=0.3)
+    # riempimento tra le due curve (risparmio di memoria)
+    ax.fill_between(widths, mine_kb, classic_kb,
+                    color=COLOR_CLASSIC, alpha=PLOT_BAND_ALPHA,
+                    linewidth=0, zorder=2)
+
+    # linea limite MCU
+    ax.axhline(limit_kb, linestyle="--", color=COLOR_LIMIT,
+               linewidth=1.2, zorder=3)
+    ax.text(h_max, limit_kb, f"  MCU limit ({limit_kb/1024:.0f} MB)",
+            va="center", ha="left",
+            fontsize=PLOT_FONT_SIZE * 0.55, color=COLOR_LIMIT)
+
+    # --- incroci curva-limite con marker e tick colorati sull'asse X ---
+    crossings = []
+    for ys, curve_color in [(mine_kb, COLOR_MINE), (classic_kb, COLOR_CLASSIC)]:
+        if ys[0] <= limit_kb <= ys[-1]:
+            x_cross = float(np.interp(limit_kb, ys, widths))
+            ax.plot([x_cross], [limit_kb], "o", color=curve_color,
+                    markersize=8, zorder=7)
+            ax.vlines(x_cross, 0, limit_kb, color=curve_color,
+                      linestyle=":", linewidth=1.3, alpha=0.8, zorder=4)
+            crossings.append((x_cross, curve_color))
+            print(f"  >>> supera il limite a hidden width ~ {x_cross:.0f}")
+
+    ax.set_xlabel("Hidden layer size (units)")
+    ax.set_ylabel("Memory (KB)")
+    ax.set_xlim(h_min, h_max)
+    ax.set_ylim(bottom=0)
+
+    ax.yaxis.set_minor_locator(AutoMinorLocator())
+    ax.grid(which="major", **GRID_MAJOR)
+    ax.grid(which="minor", axis="y", **GRID_MINOR)
+    ax.set_axisbelow(True)
+
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+
+    if SHOW_TITLE:
+        ax.set_title(
+            f"DQN memory: on-device vs classic  "
+            f"(obs={obs_dim}, act={n_actions}, replay={capacity})",
+            fontsize=PLOT_FONT_SIZE * 0.6, pad=TITLE_PAD)
+
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02),
+              ncol=1, frameon=False, handlelength=1.6,
+              borderaxespad=0.0, fontsize=PLOT_FONT_SIZE * 0.7)
+
+    # tick X colorati sugli incroci
+    cross_ticks = {int(round(xc)): c for xc, c in crossings}
+    thr = (h_max - h_min) * 0.035
+    auto_ticks = [t for t in ax.get_xticks()
+                  if h_min <= t <= h_max
+                  and all(abs(t - xc) > thr for xc in cross_ticks)]
+    ax.set_xticks(sorted(set(auto_ticks) | set(cross_ticks)))
+    ax.set_xticklabels([str(int(t)) for t in ax.get_xticks()])
+    for lbl in ax.get_xticklabels():
+        val = int(lbl.get_text())
+        if val in cross_ticks:
+            lbl.set_color(cross_ticks[val])
+            lbl.set_fontweight("bold")
+
     fig.tight_layout()
 
-    base = input("\nNome base file output [memory_plot]: ").strip() \
-        or "memory_plot"
-    fig.savefig(f"{base}.png", dpi=150)
-    fig.savefig(f"{base}.svg")
-    print(f"\nSalvati: {base}.png e {base}.svg")
+    base = input("\nNome base file output [memory_dqn]: ").strip() \
+        or "memory_dqn"
+    for fmt in PLOT_FORMATS:
+        path = f"{base}.{fmt}"
+        fig.savefig(path, format=fmt, bbox_inches="tight", dpi=PLOT_DPI)
+        print(f"[=] salvato {path}")
+
     try:
         plt.show()
     except Exception:

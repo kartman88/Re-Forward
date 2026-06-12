@@ -32,13 +32,13 @@ DATA_DIR = os.path.dirname(os.path.abspath(__file__))
 # Per ogni curva: etichetta in legenda, pattern dei file e nomi colonne.
 CURVES = {
     "PC (DQN)": {
-        "pattern": "pc_learning_curve{i}.csv",
+        "pattern": "training_pc_{i}.csv",
         "reward_col": "reward",
         "step_col": None,
         "cumstep_col": None,
     },
     "MCU (on-device)": {
-        "pattern": "learning_curve{i}.csv",
+        "pattern": "training_mcu_{i}.csv",
         "reward_col": "reward",
         "step_col": None,
         "cumstep_col": None,
