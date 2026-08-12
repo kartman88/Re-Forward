@@ -1,428 +1,311 @@
 #include "reinforce.h"
-#include "utils.h"
 #include "rng.h"
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
 
-#if DEBUG
-static float _dbg_raw_returns[MAX_STEPS];
-static float _dbg_logits[MAX_STEPS * 2];
-static float _dbg_loss;
+#if TIME_LOG
+#include "utils.h"   /* dwt_ticks / dwt_delta per il profiling */
+
+TrainTiming g_train_timing = {0};
 #endif
 
-//CARTPOLE
-#define CART_LIMIT 2.4f                 /* ±2.4 m */
-#define POLE_LIMIT 0.20943951f          /* ±12°   */
-#define STEP_LIMIT 500
+#if USE_CONTINUOUS_ACTION
+float g_reinforce_sigma[N_ACT_DIMS];
 
-//ACROBOT
-#define HEIGHT_THRESHOLD  1.0f
-
-
-
-static inline float frand(void) { return rng_uniform(); }
-
-
-int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim){
-    /* azzera i campi così, in caso di errore, i free sono sicuri */
-    buf->state_buffer    = NULL;
-    buf->action_buffer   = NULL;
-    buf->reward_buffer   = NULL;
-    buf->advantage_buffer= NULL;
-
-    /* ---------- malloc principali ----------------------------- */
-    buf->state_buffer   = malloc(n_steps * sizeof(float*));
-    buf->action_buffer  = malloc(n_steps * sizeof(action_t));
-    buf->reward_buffer  = malloc(n_steps * sizeof(float));
-    buf->advantage_buffer = malloc(n_steps * sizeof(float));
-
-    if (!buf->state_buffer || !buf->action_buffer ||
-        !buf->reward_buffer || !buf->advantage_buffer)
-        goto fail;
-
-    /* righe per la matrice delle osservazioni */
-    for (uint32_t i = 0; i < n_steps; ++i) {
-        buf->state_buffer[i] = malloc(obs_dim * sizeof(float));
-        if (!buf->state_buffer[i])
-            goto fail;
-    }
-    return 1;                       /* tutto OK */
-
-    fail:   /* qualsiasi malloc fallita → libera e segnala errore */
-		if (buf->state_buffer) {
-			for (uint32_t i = 0; i < n_steps; ++i)
-				free(buf->state_buffer[i]);
-			free(buf->state_buffer);
-		}
-		free(buf->action_buffer);
-		free(buf->reward_buffer);
-		free(buf->advantage_buffer);
-		return 0;
+void reinforce_sigma_init(void) {
+    for (int i = 0; i < N_ACT_DIMS; i++)
+        g_reinforce_sigma[i] = REINFORCE_SIGMA;
 }
+#endif
 
-int uart_recv_floats(UART_HandleTypeDef *huart,
-                     float             *dst,
-                     size_t             dim,
-                     uint32_t           timeout)
-{
-    const size_t nbytes = dim * sizeof(float);
-    uint8_t byte;
-    uint8_t buf[nbytes];                 /* dim=4*4 */
-    uint32_t t0 = HAL_GetTick();
+// ─── Episode Buffer ───────────────────────────────────────────────────────────
 
-    /* 1. Cerca lo STX ------------------------------------------------ */
-    do {
-        if (HAL_UART_Receive(huart, &byte, 1, 1) != HAL_OK) {
-            if (HAL_GetTick() - t0 > timeout) return 0; /* timeout totale */
-            continue;                                   /* riprova */
-        }
-    } while (byte != 0x02);
+int episode_buffer_init(EpisodeBuffer *buf, uint32_t T, uint32_t obs_dim) {
+    buf->obs_dim  = obs_dim;
+    buf->size     = 0;
+    buf->capacity = T;
 
-    /* 2. Legge esattamente nbytes + ETX ------------------------------ */
-    if (HAL_UART_Receive(huart, buf, nbytes, timeout) != HAL_OK) return 0;
-    if (HAL_UART_Receive(huart, &byte, 1, timeout) != HAL_OK) return 0;
-    if (byte != 0x03)                                            return 0;
+    buf->states  = malloc(T * obs_dim * sizeof(float));
+    buf->rewards = malloc(T * sizeof(float));
+    buf->returns = malloc(T * sizeof(float));
+#if USE_CONTINUOUS_ACTION
+    buf->actions = malloc(T * N_ACT_DIMS * sizeof(float));
+#else
+    buf->actions = malloc(T * sizeof(uint32_t));
+#endif
 
-    memcpy(dst, buf, nbytes);             /* OK: frame completo */
+    if (!buf->states || !buf->rewards || !buf->returns || !buf->actions)
+        return 0;
+
     return 1;
 }
 
-int uart_send_action(UART_HandleTypeDef *huart, action_t action, uint8_t done, uint32_t timeout){
-	#if USE_CONTINUOUS_ACTIONS
-		uint8_t frame[7];
-		frame[0] = 0x02; // STX
-		memcpy(&frame[1], &action, sizeof(float)); // Copia i 4 byte del float
-		frame[5] = done;
-		frame[6] = 0x03; // ETX
-		return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
-	#else
-		uint8_t frame[] = { 0x02, action, done, 0x03 };
-		return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
-	#endif
+void episode_buffer_reset(EpisodeBuffer *buf) {
+    buf->size = 0;
 }
 
-int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step, uint32_t timeout){
-	uint8_t frame[10];
-	frame[0] = 0x01; //STX
+#if USE_CONTINUOUS_ACTION
+void episode_buffer_push(EpisodeBuffer *buf, const float *obs,
+                         const float *action, float reward) {
+    if (buf->size >= buf->capacity) return;
+    uint32_t idx = buf->size;
+    memcpy(&buf->states[idx * buf->obs_dim], obs, buf->obs_dim * sizeof(float));
+    memcpy(&buf->actions[idx * N_ACT_DIMS], action, N_ACT_DIMS * sizeof(float));
+    buf->rewards[idx] = reward;
+    buf->size++;
+}
+#else
+void episode_buffer_push(EpisodeBuffer *buf, const float *obs,
+                         uint32_t action, float reward) {
+    if (buf->size >= buf->capacity) return;
+    uint32_t idx = buf->size;
+    memcpy(&buf->states[idx * buf->obs_dim], obs, buf->obs_dim * sizeof(float));
+    buf->actions[idx] = action;
+    buf->rewards[idx] = reward;
+    buf->size++;
+}
+#endif
 
-	frame[1] = (uint8_t)(dt >> 24); //MSB
-	frame[2] = (uint8_t)(dt >> 16);
-	frame[3] = (uint8_t)(dt >>  8);
-	frame[4] = (uint8_t)(dt >>  0); //LSB
+// ─── Returns e baseline ──────────────────────────────────────────────────────
 
-	frame[5] = (uint8_t)(step >> 24);
-	frame[6] = (uint8_t)(step >> 16);
-	frame[7] = (uint8_t)(step >>  8);
-	frame[8] = (uint8_t)(step >>  0);
-
-	frame[9] = 0x04; //ETX
-	return (HAL_UART_Transmit(huart, frame, sizeof(frame), timeout) == HAL_OK);
+// Ritorni Monte-Carlo scontati: G_t = r_t + gamma * G_{t+1}.
+void compute_returns(EpisodeBuffer *buf, float gamma) {
+    float G = 0.f;
+    for (int t = (int)buf->size - 1; t >= 0; --t) {
+        G = buf->rewards[t] + gamma * G;
+        buf->returns[t] = G;
+    }
 }
 
+// REINFORCE con baseline costante: sottrae la media e divide per la deviazione
+// standard dei ritorni dell'episodio. Riduce la varianza del gradiente senza
+// introdurre bias (la baseline non dipende dall'azione).
+void normalize_returns(EpisodeBuffer *buf) {
+    uint32_t n = buf->size;
+    if (n == 0) return;
 
+    float mean = 0.f;
+    for (uint32_t i = 0; i < n; i++)
+        mean += buf->returns[i];
+    mean /= (float)n;
 
-uint32_t sample_action(float *p, uint32_t dim){
-	const float EPSILON = 0.0f;               /* 1 % */
+    float var = 0.f;
+    for (uint32_t i = 0; i < n; i++) {
+        float d = buf->returns[i] - mean;
+        var += d * d;
+    }
+    float inv_std = 1.f / (sqrtf(var / (float)n) + 1e-6f);
 
-	/* ─── 1. esplorazione pura ogni tanto ─── */
-	float r = rng_uniform();                   /* uniform [0,1) */
-	if (r < EPSILON)
-		return (uint8_t)(rng_u32() % dim);     /* azione random */
-
-	/* ─── 2. campionamento “roulette-wheel” ─── */
-	float c = rng_uniform();                   /* [0,1) */
-	for (uint32_t i = 0; i < dim; ++i) {
-		if (c < p[i]) return (uint8_t)i;
-		c -= p[i];
-	}
-	return (uint8_t)(dim - 1);                 /* fallback numerico */
-
+    for (uint32_t i = 0; i < n; i++)
+        buf->returns[i] = (buf->returns[i] - mean) * inv_std;
 }
 
-// L'azione salvata nel buffer non sarà più un intero (uint8_t/uint32_t) ma un float!
-float sample_continuous_action(float mu, float sigma){
-    // Genera due numeri uniformi tra 0 e 1
-    float u1 = fmaxf(frand(), 1e-7f); // Evita log(0)
-    float u2 = frand();
+// ─── policy_sample_action ────────────────────────────────────────────────────
 
-    // Box-Muller transform per rumore Normale standard N(0,1)
-    float z0 = sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
+#if USE_CONTINUOUS_ACTION
 
-    // Scala con la nostra media e varianza
-    float action = mu + sigma * z0;
+void policy_sample_action(Network *policy, float *obs, float *action_out) {
+    policy_forward_continuous(policy, obs, action_out, g_reinforce_sigma, NULL);
+}
 
-    // (Opzionale) Clamp dell'azione se il tuo motore accetta ad es. solo [-1, 1]
-    if (action > MAX_CONTINUOUS_ACTION) action = 1.0f;
-    if (action < MIN_CONTINUOUS_ACTION) action = -1.0f;
+#else
+
+// Campionamento "roulette-wheel" dalla categorica prodotta dal softmax.
+uint32_t policy_sample_action(Network *policy, float *obs) {
+    float probs[N_ACTIONS];
+    network_forward(policy, obs, probs);
+
+    int   n = policy->layers[policy->num_layers - 1].out_dim;
+    float c = rng_uniform();
+    for (int i = 0; i < n; ++i) {
+        if (c < probs[i]) return (uint32_t)i;
+        c -= probs[i];
+    }
+    return (uint32_t)(n - 1);   // fallback numerico
+}
+
+#endif
+
+// ─── reinforce_update ────────────────────────────────────────────────────────
+
+void reinforce_update(Network *policy, EpisodeBuffer *buf) {
+    if (buf->size == 0) return;
+
+#if TIME_LOG
+    /* Il DWT e' a 32 bit e a 84 MHz wrappa ogni ~51 s: il totale viene
+     * accumulato a pezzi (uno per step di traiettoria) in un uint64, cosi'
+     * regge anche update molto lunghi. */
+    uint64_t _fwd_cyc = 0, _bwd_cyc = 0, _tot_cyc = 0;
+    uint32_t _t_chunk = dwt_ticks();
+#endif
+
+    compute_returns(buf, REINFORCE_GAMMA);
+    normalize_returns(buf);
+
+    network_zero_grad(policy);
+
+    for (uint32_t t = 0; t < buf->size; t++) {
+        float *state = &buf->states[t * buf->obs_dim];
+        float  ret   = buf->returns[t];
+
+#if TIME_LOG
+        uint32_t _tf = dwt_ticks();
+#endif
+        // Re-forward: il backward legge le attivazioni dell'ultimo forward.
+        network_forward(policy, state, NULL);
+#if TIME_LOG
+        _fwd_cyc += dwt_delta(_tf, dwt_ticks());
+        uint32_t _tb = dwt_ticks();
+#endif
+#if USE_CONTINUOUS_ACTION
+        policy_backward_continuous(policy, state,
+                                   &buf->actions[t * N_ACT_DIMS],
+                                   g_reinforce_sigma, ret);
+#else
+        policy_backward(policy, state, buf->actions[t], ret,
+                        REINFORCE_ENT_COEF);
+#endif
+#if TIME_LOG
+        uint32_t _now = dwt_ticks();
+        _bwd_cyc += dwt_delta(_tb, _now);
+        _tot_cyc += dwt_delta(_t_chunk, _now);   /* chiude il pezzo di totale */
+        _t_chunk  = _now;
+#endif
+    }
+
+#if TIME_LOG
+    uint32_t _ta = dwt_ticks();
+#endif
+    network_scale_grad(policy, 1.f / (float)buf->size);
+    network_clip_grad(policy);
+    network_adam_update(policy, REINFORCE_LR);
+#if TIME_LOG
+    uint32_t _end = dwt_ticks();
+    _tot_cyc += dwt_delta(_t_chunk, _end);   /* coda: scale/clip/adam */
+
+    g_train_timing.adam_cycles     = dwt_delta(_ta, _end);
+    g_train_timing.forward_cycles  = _fwd_cyc;
+    g_train_timing.backward_cycles = _bwd_cyc;
+    g_train_timing.total_cycles    = _tot_cyc;
+#endif
+}
+
+// ─── ReinforceAgent ──────────────────────────────────────────────────────────
+
+int reinforce_agent_init(ReinforceAgent *agent, Network *policy,
+                         reinforce_reward_fn reward_fn,
+                         reinforce_done_fn done_fn,
+                         reinforce_event_fn on_train_begin,
+                         reinforce_event_fn on_train_end)
+{
+    agent->policy         = policy;
+    agent->reward_fn      = reward_fn;
+    agent->done_fn        = done_fn;
+    agent->on_train_begin = on_train_begin;
+    agent->on_train_end   = on_train_end;
+
+    agent->step_in_ep = 0;
+    agent->first_step = 1;
+    agent->done       = 0;
+
+    memset(agent->prev_obs, 0, sizeof(agent->prev_obs));
+#if USE_CONTINUOUS_ACTION
+    memset(agent->prev_action, 0, sizeof(agent->prev_action));
+    reinforce_sigma_init();
+#else
+    agent->prev_action = 0;
+#endif
+
+    if (!episode_buffer_init(&agent->buf, MAX_STEPS_PER_EP, OBS_DIM))
+        return 0;
+
+    return 1;
+}
+
+#if USE_CONTINUOUS_ACTION
+
+void reinforce_step(ReinforceAgent *agent, const float *obs, float *action_out)
+{
+    // 1. done dello stato CORRENTE (inviato via UART; comanda il reset lato PC).
+    //    Convenzione allineata a PPO: done = is_done(s_t).
+    agent->done = agent->done_fn(agent->step_in_ep);
+
+    // 2. Push della transizione precedente (s_{t-1}, a_{t-1}): la sua reward
+    //    dipende dall'azione presa in s_{t-1}, quindi il push e' ritardato di
+    //    un passo. Quando arriva s_T terminale il buffer contiene esattamente
+    //    le T transizioni 0..T-1 dell'episodio.
+    if (!agent->first_step) {
+        float reward = agent->reward_fn(agent->prev_obs, agent->prev_action);
+        episode_buffer_push(&agent->buf, agent->prev_obs,
+                            agent->prev_action, reward);
+    }
+
+    // 3. Campiona l'azione dallo stato corrente.
+    float action[N_ACT_DIMS];
+    policy_sample_action(agent->policy, (float *)obs, action);
+
+    // 4. Memorizza (s_t, a_t) per il push del prossimo giro. L'azione salvata e'
+    //    quella NON clippata: il gradiente deve essere coerente con il campione
+    //    effettivamente estratto dalla gaussiana.
+    memcpy(agent->prev_obs,    obs,    OBS_DIM    * sizeof(float));
+    memcpy(agent->prev_action, action, N_ACT_DIMS * sizeof(float));
+
+    // 5. Azione grezza in uscita — chi chiama la clippa prima di inviarla.
+    memcpy(action_out, action, N_ACT_DIMS * sizeof(float));
+
+    agent->first_step = 0;
+    agent->step_in_ep++;
+
+    // 6. Fine episodio: update Monte-Carlo sulla traiettoria completa.
+    //    first_step torna a 1 cosi' la coppia (s_T, a_T) — azione presa in uno
+    //    stato terminale, che il PC scarta al reset — non finisce nell'episodio
+    //    successivo.
+    if (agent->done) {
+        if (agent->on_train_begin) agent->on_train_begin();
+        reinforce_update(agent->policy, &agent->buf);
+        if (agent->on_train_end)   agent->on_train_end();
+        episode_buffer_reset(&agent->buf);
+        agent->step_in_ep = 0;
+        agent->first_step = 1;
+    }
+}
+
+#else  /* discrete */
+
+uint32_t reinforce_step_discrete(ReinforceAgent *agent, const float *obs)
+{
+    // 1. done dello stato CORRENTE (convenzione allineata a PPO).
+    agent->done = agent->done_fn(agent->step_in_ep);
+
+    // 2. Push ritardato della transizione precedente (s_{t-1}, a_{t-1}).
+    if (!agent->first_step) {
+        float reward = agent->reward_fn(agent->prev_obs, agent->prev_action);
+        episode_buffer_push(&agent->buf, agent->prev_obs,
+                            agent->prev_action, reward);
+    }
+
+    // 3. Campiona l'azione dallo stato corrente.
+    uint32_t action = policy_sample_action(agent->policy, (float *)obs);
+
+    // 4. Memorizza (s_t, a_t) per il push del prossimo giro.
+    memcpy(agent->prev_obs, obs, OBS_DIM * sizeof(float));
+    agent->prev_action = action;
+
+    agent->first_step = 0;
+    agent->step_in_ep++;
+
+    // 5. Fine episodio: update Monte-Carlo sulla traiettoria completa.
+    if (agent->done) {
+        if (agent->on_train_begin) agent->on_train_begin();
+        reinforce_update(agent->policy, &agent->buf);
+        if (agent->on_train_end)   agent->on_train_end();
+        episode_buffer_reset(&agent->buf);
+        agent->step_in_ep = 0;
+        agent->first_step = 1;
+    }
 
     return action;
 }
 
-
-void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, uint32_t step, uint32_t obs_dim){
-
-	memcpy(buf->state_buffer[step], state, obs_dim * sizeof(float));
-	buf->action_buffer[step] = choosen_action;
-	buf->reward_buffer[step] = reward;
-}
-
-
-int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t *step_count, action_t *action, uint8_t *done){
-    uint32_t out_dim = net->layers[net->num_layers - 1].out_dim;
-    uint32_t in_dim = net->layers[0].in_dim;
-
-    //Immediately check if is a termination state
-    *done = done_check(obs, *step_count);
-
-    //Reward goes into the previous step
-    //The current obs is the conseguence of taking the action at t-1
-    if (*step_count > 0) {
-        float r = evaluate_reward(obs);
-        buf->reward_buffer[*step_count - 1] = r;
-    }
-
-    //Exit if episode is terminated
-    if (*done) {
-        return 1;
-    }
-
-    //Forward pass, we choose the action not for a terminal state
-    float output_forward[out_dim];
-    if(!forward(net, obs, output_forward)) return 0;
-
-    action_t a;
-    #if USE_CONTINUOUS_ACTIONS
-        // Usiamo una sigma fissa di 0.5 per esplorare
-        float mu = fmaxf(fminf(output_forward[0], MU_CLAMP), -MU_CLAMP);
-        a = sample_continuous_action(mu, 0.5f);
-    #else
-        a = sample_action(output_forward, out_dim);
-    #endif
-
-        *action = a;
-
-        memcpy(buf->state_buffer[*step_count], obs, in_dim * sizeof(float));
-        buf->action_buffer[*step_count] = a;
-
-        (*step_count)++;
-        return 1;
-}
-
-uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count){
-	if (step_count == 0) return 1; //no step in the buffer
-	//zero grad
-	zero_grad(net);
-	float *adv_buf = buf->advantage_buffer;
-	//returns & baseline
-	float G = 0.0f;
-	for (int t = step_count - 1; t >= 0; --t) {
-		float r = buf->reward_buffer[t]; //POTREI SISTEMARE QUI PER RISOLVERE IL PROBLEMA DEGLI EPISODI CON T+1
-		G = r + 0.99f * G;
-		adv_buf[t] = G;
-	}
-#if DEBUG
-	memcpy(_dbg_raw_returns, adv_buf, step_count * sizeof(float));
-	_dbg_loss = 0.f;
-#endif
-	//adv normalization, REINFORCE with costant baseline
-	float mean = 0.0f;
-	for (int t = 0; t < step_count; ++t) mean += adv_buf[t];
-	mean /= step_count;
-	for (int t = 0; t < step_count; ++t) adv_buf[t] -= mean;
-
-	float var = 0.0f;
-	for (int t = 0; t < step_count; ++t) var += adv_buf[t] * adv_buf[t];
-	float std = sqrtf(var / step_count) + 1e-6f;
-	for (int t = 0; t < step_count; ++t) adv_buf[t] /= std;
-
-
-	//re-forward
-	for(int t = 0; t < step_count; ++t){
-		float *state = buf->state_buffer[t];
-		float r = buf->reward_buffer[t];
-
-		forward(net, state, NULL);
-
-#if DEBUG
-		{
-			DenseLayer *last_l = &net->layers[net->num_layers - 1];
-			DenseLayer *prev_l = &net->layers[net->num_layers - 2];
-			uint32_t od = (uint32_t)last_l->out_dim;
-			for(int i = 0; i < (int)od; i++){
-				float acc = last_l->b[i];
-				for(int j = 0; j < last_l->in_dim; j++)
-					acc += last_l->W[i][j] * prev_l->out[j];
-				_dbg_logits[(uint32_t)t * od + i] = acc;
-			}
-			float pi_a = fmaxf(last_l->out[(int)buf->action_buffer[t]], 1e-7f);
-			_dbg_loss += -logf(pi_a) * _dbg_raw_returns[t];
-		}
-#endif
-
-		float adv = adv_buf[t];
-		action_t a = buf->action_buffer[t];
-
-
-		backward_pg(net, state, a, adv, r);
-
-	}
-
-#if DEBUG
-	_dbg_loss /= (float)step_count;
-#endif
-	//Normalize gradient
-	gradient_norm(net, step_count);
-
-
-	adam_optimizer(net);
-
-
-	return 0;
-}
-
-/*CODE FOR MOUNTAIN CAR
-uint8_t done_check(float *state, uint32_t step){
-	if (state[0] >= 0.5) return 1; //goal reached
-	if (step >= 200) return 1; //timeout
-	return 0;
-}
-
-float prev_pos = 0.f;
-float evaluate_reward(float *obs){
-	float r = 0.f;
-	r-=1.0;
-	if(obs[0]>prev_pos) r+=2.0;
-	return r;
-}
-*/
-
-/*CODE FOR CARTPOLE*/
-uint8_t done_check(float *state, uint32_t step){
-	if (fabsf(state[0]) > CART_LIMIT) return 1;      //out of bound
-	if (fabsf(state[2]) > POLE_LIMIT) return 1;      //±12°
-	if (step >= STEP_LIMIT){
-		return 1;   //timeout
-	}
-	return 0;
-}
-
-float evaluate_reward(float *state){
-	return 1.f;
-}
-
-/*CODE FOR PENDULUM
-uint8_t done_check(float *state, uint32_t step) {
-    // Il documento conferma che non ci sono condizioni di "out of bounds".
-    // Si tronca solo al raggiungimento dei 200 step.
-    if (step >= MAX_STEPS) {
-        return 1;   // Timeout
-    }
-    return 0;
-}
-
-// --- Funzione di Reward ---
-float evaluate_reward(float *state) {
-    // In base alla documentazione (Observation Space), l'array state contiene:
-    // state[0] = x = cos(theta)
-    // state[1] = y = sin(theta)
-    // state[2] = Angular Velocity (theta_dt)
-
-    // 1. Ricaviamo l'angolo theta già normalizzato tra [-pi, pi]
-    float theta = atan2f(state[1], state[0]);
-    float theta_dt = state[2];
-
-    // 2. La coppia (torque).
-    // Come detto in precedenza, la firma della tua funzione non accetta l'azione.
-    // Se non puoi modificare la firma o leggere l'azione, poniamo torque a 0.0f.
-    // Il range valido della torque è tra -2.0 e 2.0.
-    float torque = 0.0f;
-
-    // 3. Applichiamo la formula ESATTA del documento:
-    // r = -(theta^2 + 0.1 * theta_dt^2 + 0.001 * torque^2)
-    float reward = -( (theta * theta) + 0.1f * (theta_dt * theta_dt) + 0.001f * (torque * torque) );
-
-    return reward;
-}
-*/
-
-
-/*CODE FOR ACROBOT
-uint8_t done_check(float *state, uint32_t step){
-	uint16_t a1 = 20;
-	uint16_t a2 = 10;
-	uint32_t goal1 = 0;
-	uint32_t goal2 = 180;
-	float cos1 = state[0];
-	float sin1 = state[1];
-	float cos2 = state[2];
-	float sin2 = state[3];
-	float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
-	float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
-	uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
-	uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
-	if((angle2_reached) || step>=500) return 1;
-	else return 0;
-}
-
-
-float evaluate_reward(float *state, uint32_t step){
-	int reward = -1;
-	uint16_t a1 = 20;
-	uint16_t a2 = 10;
-	uint32_t goal1 = 0;
-	uint32_t goal2 = 180;
-	float cos1 = state[0];
-	float sin1 = state[1];
-	float cos2 = state[2];
-	float sin2 = state[3];
-	float theta1 = atan2f(sin1, cos1) * (180.0 / M_PI);
-	float theta2 = atan2f(sin2, cos2) * (180.0 / M_PI);
-	uint8_t angle1_reached = (theta1<goal1+a1)&&(theta1>goal1-a1);
-	uint8_t angle2_reached = (theta2<goal2+a2)&&(theta2>goal2-a2);
-	if((angle2_reached) && (angle1_reached)) reward = reward + 100;
-	return reward;
-}
-*/
-
-#if DEBUG
-int uart_send_weights(UART_HandleTypeDef *huart, NeuralNet *net, uint32_t timeout){
-	uint32_t n = 0;
-	for(int l = 0; l < net->num_layers; l++)
-		n += (uint32_t)(net->layers[l].out_dim * net->layers[l].in_dim + net->layers[l].out_dim);
-
-	uint8_t hdr[5] = {0x05, (uint8_t)n, (uint8_t)(n>>8), (uint8_t)(n>>16), (uint8_t)(n>>24)};
-	HAL_UART_Transmit(huart, hdr, 5, timeout);
-
-	for(int l = 0; l < net->num_layers; l++){
-		DenseLayer *ly = &net->layers[l];
-		for(int i = 0; i < ly->out_dim; i++)
-			HAL_UART_Transmit(huart, (uint8_t*)ly->W[i], (uint16_t)(ly->in_dim * sizeof(float)), timeout);
-		HAL_UART_Transmit(huart, (uint8_t*)ly->b, (uint16_t)(ly->out_dim * sizeof(float)), timeout);
-	}
-	uint8_t etx = 0x06;
-	return (HAL_UART_Transmit(huart, &etx, 1, timeout) == HAL_OK);
-}
-
-int uart_send_debug_batch(UART_HandleTypeDef *huart, Buffer *buf, NeuralNet *net,
-                          uint32_t step_count, uint32_t obs_dim, uint32_t timeout){
-	uint32_t od = (uint32_t)net->layers[net->num_layers-1].out_dim;
-	uint8_t hdr[9] = {
-		0x07,
-		(uint8_t)step_count, (uint8_t)(step_count>>8), (uint8_t)(step_count>>16), (uint8_t)(step_count>>24),
-		(uint8_t)od,         (uint8_t)(od>>8),         (uint8_t)(od>>16),         (uint8_t)(od>>24)
-	};
-	HAL_UART_Transmit(huart, hdr, 9, timeout);
-
-	for(uint32_t t = 0; t < step_count; t++)
-		HAL_UART_Transmit(huart, (uint8_t*)buf->state_buffer[t], (uint16_t)(obs_dim * sizeof(float)), timeout);
-
-	HAL_UART_Transmit(huart, (uint8_t*)buf->action_buffer, (uint16_t)(step_count * sizeof(action_t)), timeout);
-
-	HAL_UART_Transmit(huart, (uint8_t*)_dbg_raw_returns,      (uint16_t)(step_count * sizeof(float)), timeout);
-	HAL_UART_Transmit(huart, (uint8_t*)buf->advantage_buffer, (uint16_t)(step_count * sizeof(float)), timeout);
-	HAL_UART_Transmit(huart, (uint8_t*)_dbg_logits,           (uint16_t)(step_count * od * sizeof(float)), timeout);
-	HAL_UART_Transmit(huart, (uint8_t*)&_dbg_loss,            sizeof(float), timeout);
-
-	uint8_t etx = 0x08;
-	return (HAL_UART_Transmit(huart, &etx, 1, timeout) == HAL_OK);
-}
-#endif
-
+#endif  /* USE_CONTINUOUS_ACTION */
