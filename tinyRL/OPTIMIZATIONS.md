@@ -5,6 +5,14 @@ proposte per versioni future. L'obiettivo è rendere ogni scelta replicabile su
 qualsiasi porting dello stesso algoritmo (DQN, PPO, REINFORCE) su MCU con memoria
 limitata.
 
+> **Nota sul branch `PPO_F446`.** L'analisi qui sotto è scritta sul target
+> originale (NUCLEO-H743ZI2, Cortex-M7 @ 480 MHz, con cache L1). Su questo branch
+> il firmware gira su NUCLEO-F446RE (Cortex-M4 @ 84 MHz, 128 KB di RAM, **senza
+> cache L1 né MPU**): le considerazioni algoritmiche restano valide, ma i numeri
+> di tempo e i ragionamenti su cache line e D-cache non si applicano. Le
+> differenze di piattaforma e il nuovo bilancio di memoria sono in
+> [`PORTING_F446.md`](PORTING_F446.md).
+
 ---
 
 ## Parte 1 — Ottimizzazioni già implementate

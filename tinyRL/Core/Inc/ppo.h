@@ -14,7 +14,12 @@
 #define PPO_CLIP_EPS      0.2f
 #define PPO_EPOCHS        8
 #define PPO_BATCH_SIZE    64
-#define ROLLOUT_STEPS     2048
+/* NUCLEO-F446RE: 128 KB di SRAM in tutto, contro i 512 KB di RAM_D1 usati
+ * sull'H7. Con la topologia 64-64 dell'H7 le sole due reti (pesi + dW + mW + vW)
+ * occupano ~163 KB, quindi non entrano a prescindere dal rollout: la topologia
+ * scende a 32-32 (vedi main.c) e il rollout da 2048 a 512 step.
+ * Budget risultante ~90.6 KB su 128 KB (memory_calculator_ppo.py). */
+#define ROLLOUT_STEPS     512
 #define PPO_C1            0.5f
 #define PPO_C2            0.01f
 #define PPO_GRAD_CLIP     0.5f
@@ -30,7 +35,14 @@
 // never drops below PPO_SIGMA_MIN.
 #define PPO_SIGMA_INIT     1.5f
 #define PPO_SIGMA_MIN      0.1f
-#define PPO_SIGMA_N_STEPS  500000
+/* ppo_sigma_decay() viene chiamata una volta per ppo_update, cioe' ogni
+ * ROLLOUT_STEPS step di ambiente. Accorciando il rollout (2048 -> 512) gli
+ * update diventano 4x piu' frequenti: a parita' di PPO_SIGMA_N_STEPS sigma
+ * collasserebbe 4x prima in termini di step di ambiente. Il conteggio viene
+ * quindi riscalato sul rollout di riferimento dell'H7, cosi' la traiettoria di
+ * sigma in funzione degli step di ambiente resta identica al build H7. */
+#define PPO_SIGMA_REF_ROLLOUT  2048
+#define PPO_SIGMA_N_STEPS  (500000 * PPO_SIGMA_REF_ROLLOUT / ROLLOUT_STEPS)
 #define PPO_SIGMA_DECAY    (logf(PPO_SIGMA_INIT / PPO_SIGMA_MIN) / (float)PPO_SIGMA_N_STEPS)
 
 extern float g_ppo_log_sigma[N_ACT_DIMS];

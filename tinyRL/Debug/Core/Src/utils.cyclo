@@ -1,8 +1,0 @@
-../Core/Src/utils.c:3:7:clip	1
-../Core/Src/utils.c:13:5:dwt_init	1
-../Core/Src/utils.c:34:10:dwt_ticks	1
-../Core/Src/utils.c:39:10:dwt_delta	1
-../Core/Src/utils.c:43:10:cycles_to_ms	1
-../Core/Src/utils.c:47:10:cycles_to_us	1
-../Core/Src/utils.c:51:10:cycles_to_ns	1
-../Core/Src/utils.c:58:10:cycles64_to_us	1

@@ -1,7 +1,7 @@
 #ifndef UART_H
 #define UART_H
 
-#include "stm32h7xx_hal.h"
+#include "stm32f4xx_hal.h"
 #include <stdlib.h>
 
 int uart_recv_floats(UART_HandleTypeDef *huart, float *dst, size_t dim,
