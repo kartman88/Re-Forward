@@ -1,4 +1,4 @@
-../Core/Src/rng.c:11:10:rng_u32	40	static
-../Core/Src/rng.c:19:6:rng_seed	48	static
-../Core/Src/rng.c:28:7:rng_uniform	8	static
-../Core/Src/rng.c:33:7:rng_normal	24	static
+../Core/Src/rng.c:11:10:rng_u32	12	static
+../Core/Src/rng.c:19:6:rng_seed	12	static
+../Core/Src/rng.c:28:7:rng_uniform	12	static
+../Core/Src/rng.c:33:7:rng_normal	40	static

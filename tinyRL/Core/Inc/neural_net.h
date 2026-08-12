@@ -1,47 +1,63 @@
 #ifndef NEURAL_NET_H
 #define NEURAL_NET_H
 #include "dense_layer.h"
+#include <math.h>
+#include <stdint.h>
 
-//Change this to decide which type of action you use
-#define USE_CONTINUOUS_ACTIONS 0
+// ── Action mode ────────────────────────────────────────────────────────────────
+// 0 = discrete (categorical softmax)
+// 1 = continuous (diagonal Gaussian with fixed std); the policy outputs only
+//     mu_0..mu_{D-1}
+#define USE_CONTINUOUS_ACTION   0
 
-#define DEBUG 0   // 1 = abilita dump dati per debug, 0 = nessun overhead
+#define N_ACT_DIMS              1     // continuous: numero di dim di azione indipendenti
 
-#if USE_CONTINUOUS_ACTIONS
-	typedef float action_t;
-#else
-	typedef uint8_t action_t;
-#endif
+// ── Network / optimizer constants ──────────────────────────────────────────────
+#define BETA1           0.9f
+#define BETA2           0.999f
+#define EPS_ADAM        1e-8f
+#define N_ACTIONS       2       // discrete mode: CartPole-v1 -> {sinistra, destra}
+#define OBS_DIM         4       // CartPole-v1: [x, x_dot, theta, theta_dot]
 
-#define LR 0.01f //0.01 and 0.02 good for CartPole
-#define BETA1 0.9f
-#define BETA2 0.999f
-#define EPS_ADAM 1e-8f
-#define GAMMA 0.99f
-#define ENT_BETA 0.001f //0.001 good for cartpole
-#define MAX_EPISODE 100
-#define MAX_STEPS 200
-
-#define MAX_CONTINUOUS_ACTION 2.0f
-#define MIN_CONTINUOUS_ACTION -2.0f
-
-/* Limite sulla media (pre-rumore) della policy continua: impedisce il feedback
- * che farebbe esplodere i pesi dell'actor in float32. */
-#define MU_CLAMP 8.0f
+// Limite sull'uscita della policy continua (mu). Non toglie espressivita' ma
+// spezza il feedback che farebbe esplodere i pesi in float32; usando fminf/fmaxf
+// un eventuale mu NaN viene sanificato a +-MU_CLAMP.
+#define MU_CLAMP        8.0f
 
 typedef struct {
     DenseLayer *layers;
-    int num_layers;
-    uint32_t adam_t; //adam steps counter
-} NeuralNet;
+    uint8_t     num_layers;
+    uint32_t    adam_t;
+} Network;
 
-int init_network(NeuralNet *net, int num_layers, int *net_topology, ActivationType *activations);
 void softmax(float *in, float *out, int n);
-int forward(NeuralNet *net, float *input, float *output_final);
-void backward_core(NeuralNet *net, float *dout_last, float *input);
-void backward_pg(NeuralNet *net, float *input, action_t action, float advantage, float reward);
-void adam_optimizer(NeuralNet *net);
-void gradient_norm(NeuralNet *net, uint32_t step_count);
-void zero_grad(NeuralNet *net);
+
+int  network_init(Network *net, int num_layers, int *topology,
+                  ActivationType *activations);
+int  network_forward(Network *net, float *input, float *out);
+void network_zero_grad(Network *net);
+void network_scale_grad(Network *net, float scale);
+void network_clip_grad(Network *net);
+void network_adam_update(Network *net, float lr);
+
+// ── REINFORCE policy ──────────────────────────────────────────────────────────
+// Il gradiente accumulato e' sempre quello della LOSS (da minimizzare):
+//   L = -log pi(a|s) * G  -  ent_coef * H[pi]
+// cosi' network_adam_update puo' fare discesa come in PPO/DQN, invece della
+// risalita con il segno invertito della vecchia versione F446.
+void  policy_forward(Network *policy, float *obs, float *probs_out,
+                     float *log_prob_out, uint32_t action, float *entropy_out);
+void  policy_backward(Network *policy, float *obs, uint32_t action,
+                      float ret, float entropy_coef);
+
+#if USE_CONTINUOUS_ACTION
+// Gaussiana diagonale a sigma fissa: la policy emette N_ACT_DIMS medie (mu),
+// sigma vive in g_reinforce_sigma (reinforce.h).
+void  policy_forward_continuous(Network *policy, float *obs, float *action_out,
+                                const float *sigma, float *log_prob_out);
+void  policy_backward_continuous(Network *policy, float *obs,
+                                 const float *action, const float *sigma,
+                                 float ret);
+#endif
 
 #endif

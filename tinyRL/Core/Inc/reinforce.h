@@ -1,56 +1,131 @@
 #ifndef REINFORCE_H
 #define REINFORCE_H
 
-#include "stm32f4xx_hal.h"
-#include <string.h>
-#include <stdlib.h>
-#include <math.h>
+#include "main.h"   /* HAL della famiglia target + TIME_LOG */
 #include "neural_net.h"
 #include <stdint.h>
+#include <stdlib.h>
 
+// REINFORCE Hyperparameters (Monte-Carlo policy gradient, baseline costante)
+#define REINFORCE_LR        0.01f   // 0.01 / 0.02 vanno bene per CartPole
+#define REINFORCE_GAMMA     0.99f
+#define REINFORCE_ENT_COEF  0.001f  // 0.001 va bene per CartPole
+#define MAX_STEPS_PER_EP    500     // CartPole-v1: troncamento a 500 step
+#define MAX_EPISODE         1000
 
-typedef struct{
-	float **state_buffer;
-	action_t *action_buffer;
-	float *reward_buffer;
-	float *advantage_buffer;
-}Buffer;
-
-typedef enum {
-    CART_POLE,
-	ACROBOT
-	//FUTURE IMPLEMENTATIONS NEW ENVS
-} EnvType;
-
-
-//buffer init
-int buffer_init(Buffer *buf, uint32_t n_steps, uint32_t obs_dim);
-//uart recieve
-int uart_recv_floats(UART_HandleTypeDef *huart, float *dst, size_t dim, uint32_t timeout);
-//uart_send action
-int uart_send_action(UART_HandleTypeDef *huart, action_t action, uint8_t done, uint32_t timeout);
-int uart_send_log(UART_HandleTypeDef *huart, uint32_t dt, uint32_t step, uint32_t timeout);
-//sample action
-uint32_t sample_action(float *p, uint32_t action_dim);
-float sample_continuous_action(float mu, float sigma);
-//step function
-int step(Buffer *buf, NeuralNet *net, float *obs, uint32_t *step, action_t *action, uint8_t *done);
-//store step
-void store_step(Buffer *buf, float *state, uint32_t choosen_action, float reward, uint32_t step, uint32_t obs_dim);
-//finish episode
-uint32_t finish_episode(Buffer *buf, NeuralNet *net, uint32_t step_count);
-
-//done function cartpole
-uint8_t done_check(float *state, uint32_t step);
-//reward function
-float evaluate_reward(float *state);
-
-#if DEBUG
-int uart_send_weights(UART_HandleTypeDef *huart, NeuralNet *net, uint32_t timeout);
-int uart_send_debug_batch(UART_HandleTypeDef *huart, Buffer *buf, NeuralNet *net,
-                          uint32_t step_count, uint32_t obs_dim, uint32_t timeout);
+// Policy output size: usare REINFORCE_POLICY_OUT_DIM per l'ultimo layer.
+#if USE_CONTINUOUS_ACTION
+#define REINFORCE_POLICY_OUT_DIM  N_ACT_DIMS
+// Bound simmetrico: l'utente puo' clippare in [-ACTION_SCALE, +ACTION_SCALE].
+#define ACTION_SCALE              2.0f
+// Deviazione standard fissa usata sia nel campionamento sia nel gradiente.
+#define REINFORCE_SIGMA           0.5f
+extern float g_reinforce_sigma[N_ACT_DIMS];
+void reinforce_sigma_init(void);
+#else
+#define REINFORCE_POLICY_OUT_DIM  N_ACTIONS
 #endif
 
+// ── Episode Buffer ────────────────────────────────────────────────────────────
+// REINFORCE e' Monte-Carlo: serve la traiettoria completa di UN episodio, che
+// viene consumata e svuotata a ogni update.
 
+typedef struct {
+    float    *states;
+    float    *rewards;
+    float    *returns;    // ritorni scontati, poi normalizzati in place
+#if USE_CONTINUOUS_ACTION
+    float    *actions;
+#else
+    uint32_t *actions;
+#endif
+    uint32_t  size;
+    uint32_t  capacity;
+    uint32_t  obs_dim;
+} EpisodeBuffer;
+
+#if TIME_LOG
+/* Profiling: cicli DWT misurati dentro reinforce_update (una chiamata = un
+ * update, cioe' un episodio). total = intero update; forward = re-forward della
+ * traiettoria; backward = policy_backward; adam = media/clip dei gradienti +
+ * network_adam_update.
+ * Accumulatori a 64 bit: il DWT e' a 32 bit e a 480 MHz wrappa ogni ~8.9 s,
+ * potenzialmente meno di un update su un episodio lungo. */
+typedef struct {
+    uint64_t total_cycles;
+    uint64_t forward_cycles;
+    uint64_t backward_cycles;
+    uint64_t adam_cycles;
+} TrainTiming;
+
+extern TrainTiming g_train_timing;
+#endif /* TIME_LOG */
+
+int  episode_buffer_init(EpisodeBuffer *buf, uint32_t T, uint32_t obs_dim);
+void episode_buffer_reset(EpisodeBuffer *buf);
+#if USE_CONTINUOUS_ACTION
+void episode_buffer_push(EpisodeBuffer *buf, const float *obs,
+                         const float *action, float reward);
+#else
+void episode_buffer_push(EpisodeBuffer *buf, const float *obs,
+                         uint32_t action, float reward);
+#endif
+
+void compute_returns(EpisodeBuffer *buf, float gamma);
+void normalize_returns(EpisodeBuffer *buf);
+
+// ── Action sampling ───────────────────────────────────────────────────────────
+
+#if USE_CONTINUOUS_ACTION
+void     policy_sample_action(Network *policy, float *obs, float *action_out);
+#else
+uint32_t policy_sample_action(Network *policy, float *obs);
+#endif
+
+void reinforce_update(Network *policy, EpisodeBuffer *buf);
+
+// ── ReinforceAgent — high-level API ───────────────────────────────────────────
+
+#if USE_CONTINUOUS_ACTION
+typedef float (*reinforce_reward_fn)(const float *obs, const float *action);
+#else
+typedef float (*reinforce_reward_fn)(const float *obs, uint32_t action);
+#endif
+typedef uint8_t (*reinforce_done_fn)(uint32_t step_in_ep);
+typedef void    (*reinforce_event_fn)(void);
+
+typedef struct {
+    Network       *policy;
+    EpisodeBuffer  buf;
+
+    uint32_t       step_in_ep;
+    uint8_t        first_step;
+
+    float          prev_obs[OBS_DIM];
+#if USE_CONTINUOUS_ACTION
+    float          prev_action[N_ACT_DIMS];
+#else
+    uint32_t       prev_action;
+#endif
+
+    uint8_t        done;           // set inside reinforce_step, readable by caller
+
+    reinforce_reward_fn reward_fn;
+    reinforce_done_fn   done_fn;
+    reinforce_event_fn  on_train_begin; // optional (NULL = no-op)
+    reinforce_event_fn  on_train_end;   // optional (NULL = no-op)
+} ReinforceAgent;
+
+int reinforce_agent_init(ReinforceAgent *agent, Network *policy,
+                         reinforce_reward_fn reward_fn,
+                         reinforce_done_fn done_fn,
+                         reinforce_event_fn on_train_begin,
+                         reinforce_event_fn on_train_end);
+
+#if USE_CONTINUOUS_ACTION
+void     reinforce_step(ReinforceAgent *agent, const float *obs, float *action_out);
+#else
+uint32_t reinforce_step_discrete(ReinforceAgent *agent, const float *obs);
+#endif
 
 #endif

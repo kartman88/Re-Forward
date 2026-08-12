@@ -1,8 +1,9 @@
-../Core/Src/neural_net.c:6:5:init_network	40	static
-../Core/Src/neural_net.c:19:6:softmax	56	static
-../Core/Src/neural_net.c:36:5:forward	56	static
-../Core/Src/neural_net.c:76:6:zero_grad	32	static
-../Core/Src/neural_net.c:91:6:backward_core	72	static
-../Core/Src/neural_net.c:139:6:backward_pg	88	dynamic
-../Core/Src/neural_net.c:168:6:adam_optimizer	56	static
-../Core/Src/neural_net.c:193:6:gradient_norm	48	static
+../Core/Src/neural_net.c:7:6:softmax	40	static
+../Core/Src/neural_net.c:81:5:network_init	32	static
+../Core/Src/neural_net.c:98:5:network_forward	104	static
+../Core/Src/neural_net.c:160:6:network_zero_grad	24	static
+../Core/Src/neural_net.c:173:6:network_scale_grad	16	static
+../Core/Src/neural_net.c:184:6:network_clip_grad	20	static
+../Core/Src/neural_net.c:220:6:network_adam_update	56	static
+../Core/Src/neural_net.c:231:6:policy_forward	32	static
+../Core/Src/neural_net.c:251:6:policy_backward	88	static
