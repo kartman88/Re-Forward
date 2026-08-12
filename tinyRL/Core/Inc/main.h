@@ -76,6 +76,10 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN Private defines */
 
+/* Profiling dei tempi di esecuzione di ppo_update: 1 = attivo, 0 = disattivo.
+ * Deve corrispondere al TIME_LOG di hil_trainer_continuous.py lato PC. */
+#define TIME_LOG 1
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

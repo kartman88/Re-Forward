@@ -5,3 +5,4 @@
 ../Core/Src/utils.c:43:10:cycles_to_ms	8	static
 ../Core/Src/utils.c:47:10:cycles_to_us	8	static
 ../Core/Src/utils.c:51:10:cycles_to_ns	8	static
+../Core/Src/utils.c:58:10:cycles64_to_us	8	static

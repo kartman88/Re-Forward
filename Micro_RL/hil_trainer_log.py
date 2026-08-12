@@ -52,6 +52,16 @@ CONSOLE_LINES = 5
 LOG_FOLDER   = "learning_curve_comparison"   # cartella di destinazione
 LOG_FILENAME = "training_mcu_1.csv"          # incrementa il numero per ogni run
 
+# Profiling: con TIME_LOG attivo la scheda invia UNA RIGA per ogni update di
+# ppo_update, marcata con PROF_MARK e chiusa da \n. Il PC la appende subito al
+# CSV, quindi il file e' leggibile durante il training (es. `tail -f`) e non si
+# perde nulla se la sessione viene chiusa a meta'.
+# Deve corrispondere al TIME_LOG di Core/Inc/main.h.
+TIME_LOG = True
+PROF_CSV_FILENAME = "mcu_timings_1.csv"      # stesso numero di run di LOG_FILENAME
+PROF_MARK   = b"<<<PROF>>>"
+PROF_HEADER = "episode,steps,total_ms,forward_ms,backward_ms,adam_ms"
+
 # ------------------------------------------------------------
 #  STRUCT SERIALI (auto-calcolate, non toccare)
 # ------------------------------------------------------------
@@ -94,21 +104,105 @@ def compute_reward(obs, action):
     ctrl_cost = float(np.sum(np.square(action)))
     return healthy + float(obs[5]) - 1e-3 * ctrl_cost
 
-def recv_action_done(ser: serial.Serial):
-    """Legge il frame di risposta. Ritorna (actions, done) o None se incompleto.
+# Buffer di ricezione persistente: sullo stesso stream arrivano sia i frame
+# azione binari sia le righe di profiling testuali. Accumuliamo i byte e li
+# interpretiamo senza perdere l'allineamento.
+_rx = bytearray()
+_prof_rows = 0      # righe di timing gia' scritte su file
+_prof_last = None   # ultima riga ricevuta, mostrata nella dashboard
+
+
+def _drain_prof_rows(prof_path: str):
+    """Estrae dal buffer le righe di timing complete (PROF_MARK...\\n) e le
+    appende subito al CSV, una per update PPO. Il file resta consultabile durante
+    il training: la prima riga arriva dopo il primo update (~ROLLOUT_STEPS step),
+    non a fine sessione."""
+    global _prof_rows, _prof_last
+    while True:
+        b = _rx.find(PROF_MARK)
+        if b < 0:
+            return
+        e = _rx.find(b"\n", b + len(PROF_MARK))
+        if e < 0:
+            return  # riga non ancora arrivata per intero
+        row = bytes(_rx[b + len(PROF_MARK):e]).decode("ascii", errors="replace").strip()
+        # Consuma solo la riga: eventuali frame azione arrivati PRIMA del
+        # marcatore restano nel buffer e li raccoglie lo scanner dei frame.
+        del _rx[b:e + 1]
+        if row.count(",") != 5:
+            continue  # riga corrotta (byte persi sul link): si salta, arrivera' la prossima
+        with open(prof_path, "w" if _prof_rows == 0 else "a", newline="") as f:
+            if _prof_rows == 0:
+                f.write(PROF_HEADER + "\n")
+            f.write(row + "\n")
+        _prof_rows += 1
+        _prof_last = row
+
+
+def recv_action_done(ser: serial.Serial, prof_path: str = None):
+    """Legge dallo stream. Ritorna (actions, done) se un frame azione valido e'
+    pronto, altrimenti None. Cattura anche le righe di profiling verso prof_path
+    senza perdere l'allineamento dei frame binari.
     Per azioni continue: actions e' un np.ndarray di shape (ACTION_DIM,).
     Per azioni discrete: actions e' un int.
     """
-    frame = ser.read(_ACTION_FRAME_LEN)
-    if len(frame) == _ACTION_FRAME_LEN and frame[0] == 0x02 and frame[-1] == 0x03:
-        action_bytes = frame[1:1 + ACTION_BYTE_SIZE]
-        if USE_CONTINUOUS_ACTIONS:
-            actions = np.array(struct.unpack(_ACTION_STRUCT, action_bytes), dtype=np.float32)
-        else:
-            actions = struct.unpack(_ACTION_STRUCT, action_bytes)[0]  # int discreto
-        done_flag = bool(frame[-2])
-        return (actions, done_flag)
+    global _rx
+    data = ser.read(ser.in_waiting or _ACTION_FRAME_LEN)
+    if data:
+        _rx.extend(data)
+
+    # 1. Cattura le righe di profiling arrivate (una per update PPO).
+    if prof_path is not None:
+        _drain_prof_rows(prof_path)
+
+    # 2. Cerca un frame azione valido: STX ... ETX alla posizione attesa.
+    i = _rx.find(b'\x02')
+    while i >= 0 and len(_rx) - i >= _ACTION_FRAME_LEN:
+        frame = _rx[i:i + _ACTION_FRAME_LEN]
+        if frame[-1] == 0x03:
+            action_bytes = frame[1:1 + ACTION_BYTE_SIZE]
+            if USE_CONTINUOUS_ACTIONS:
+                actions = np.array(struct.unpack(_ACTION_STRUCT, action_bytes),
+                                   dtype=np.float32)
+            else:
+                actions = struct.unpack(_ACTION_STRUCT, action_bytes)[0]  # int discreto
+            done_flag = bool(frame[-2])
+            del _rx[:i + _ACTION_FRAME_LEN]   # consuma fino a fine frame
+            return (actions, done_flag)
+        i = _rx.find(b'\x02', i + 1)          # falso STX, riprova dal successivo
+
+    # 3. Nessun frame: evita crescita illimitata del buffer (ma non tagliare una
+    #    riga di profiling in arrivo).
+    if len(_rx) > 8192 and PROF_MARK not in _rx:
+        del _rx[:-64]
     return None
+
+
+def open_serial():
+    """Apre la porta seriale. Solleva l'eccezione se non e' disponibile."""
+    ser = serial.Serial(PORT, BAUDRATE, timeout=SER_TIMEOUT_S)
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+    return ser
+
+
+def reopen_serial(old_ser):
+    """Il VCP dell'ST-Link puo' sparire e ri-enumerare (USB disconnect): in quel
+    caso read/write falliscono con EIO. Chiude e riapre la porta finche' non
+    torna disponibile, senza perdere il training gia' fatto sul micro."""
+    try:
+        old_ser.close()
+    except Exception:
+        pass
+    _rx.clear()   # il buffer parziale non e' piu' allineato allo stream
+    print("\n[PC] Seriale caduta (USB disconnect?): attendo che la porta torni...")
+    while True:
+        try:
+            ser = open_serial()
+            print("[PC] Seriale ripristinata, riprendo.")
+            return ser
+        except Exception:
+            time.sleep(0.5)
 
 def clear_console():
     """Pulisce il terminale"""
@@ -120,9 +214,7 @@ def clear_console():
 def main():
     print(f"[PC] Apertura seriale su {PORT} a {BAUDRATE} baud...")
     try:
-        ser = serial.Serial(PORT, BAUDRATE, timeout=SER_TIMEOUT_S)
-        ser.reset_input_buffer()
-        ser.reset_output_buffer()
+        ser = open_serial()
     except Exception as e:
         print(f"Errore apertura seriale: {e}")
         return
@@ -178,6 +270,13 @@ def main():
     csv_writer.writerow(["episode", "reward", "steps"])
     csv_file.flush()
 
+    if TIME_LOG:
+        prof_path = os.path.join(LOG_FOLDER, PROF_CSV_FILENAME)
+        print(f"[PC] Timing MCU: una riga per update in {prof_path} "
+              f"(la prima arriva al primo update)")
+    else:
+        prof_path = None
+
     obs, _ = env.reset()
 
     try:
@@ -197,14 +296,21 @@ def main():
                     env.render()
                 now_ms = time.time() * 1000
 
-                # 1. Ritrasmissione robusta
-                if (not state_sent) or (now_ms - last_tx_ms > MAX_WAIT_MS):
-                    send_state(ser, obs)
-                    last_tx_ms = now_ms
-                    state_sent = True
+                # 1. Ritrasmissione robusta + 2. lettura risposta. Il VCP puo'
+                #    ri-enumerare a meta' sessione: in quel caso riapriamo la
+                #    porta invece di far morire il training.
+                try:
+                    if (not state_sent) or (now_ms - last_tx_ms > MAX_WAIT_MS):
+                        send_state(ser, obs)
+                        last_tx_ms = now_ms
+                        state_sent = True
 
-                # 2. Prova a leggere la risposta
-                pkt = recv_action_done(ser)
+                    pkt = recv_action_done(ser, prof_path)
+                except (serial.SerialException, OSError):
+                    ser = reopen_serial(ser)
+                    state_sent = False
+                    continue
+
                 if pkt is None:
                     time.sleep(SEND_PERIOD_MS / 1000.0)
                     continue
@@ -273,6 +379,12 @@ def main():
                 print(f"Ultimo blocco di training ({update_count}) concluso in {last_update_time:.2f} sec")
             else:
                 print("Accumulo dati nel buffer... In attesa del primo training.")
+            if TIME_LOG:
+                if _prof_rows:
+                    print(f"Timing MCU: {_prof_rows} update -> {prof_path}")
+                    print(f"  ultimo (ep,upd,tot,fwd,bwd,adam): {_prof_last}")
+                else:
+                    print("Timing MCU: in attesa del primo update...")
             print("------------------------------------------------------------")
             print(f"{'EPISODIO':>8} | {'REWARD':>7} | {'MEDIA (20)':>10} | {'STEP TOT.':>9} | {'UPDATE N':>9}")
             print("------------------------------------------------------------")

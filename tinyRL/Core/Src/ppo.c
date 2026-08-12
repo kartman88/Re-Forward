@@ -4,6 +4,12 @@
 #include <string.h>
 #include <stdlib.h>
 
+#if TIME_LOG
+#include "utils.h"   /* dwt_ticks / dwt_delta per il profiling */
+
+TrainTiming g_train_timing = {0};
+#endif
+
 // ─── Rollout Buffer ───────────────────────────────────────────────────────────
 
 int rollout_buffer_init(RolloutBuffer *buf, uint32_t T, uint32_t obs_dim) {
@@ -189,6 +195,16 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
     static float probs[PPO_N_ACTIONS];
 #endif
 
+#if TIME_LOG
+    /* --- profiling: azzera e avvia i contatori DWT ---
+     * Il totale NON si misura con un unico delta start/stop: il CYCCNT e' a
+     * 32 bit (wrap ogni ~8.9 s a 480 MHz) mentre un update dura di piu'. Lo
+     * accumuliamo a pezzi, uno per minibatch (pochi ms l'uno), su un uint64. */
+    g_train_timing = (TrainTiming){0};
+    uint64_t _fwd_cyc = 0, _bwd_cyc = 0, _adam_cyc = 0, _tot_cyc = 0;
+    uint32_t _t_chunk = dwt_ticks();
+#endif
+
     for (uint32_t i = 0; i < N; i++) idx[i] = i;
 
     network_zero_grad(actor);
@@ -215,25 +231,66 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
                 float     ret_t        = buf->returns[t];
                 float     log_prob_old = buf->log_probs_old[t];
 
-#if USE_CONTINUOUS_ACTION
-                float *a_t = &buf->actions[t * N_ACT_DIMS];
-                actor_forward_continuous(actor, obs_t, a_t, g_ppo_log_sigma,
-                                         &log_prob_new, &entropy);
-                float ratio = expf(fmaxf(fminf(log_prob_new - log_prob_old, 10.f), -10.f));
-                actor_backward_continuous(actor, obs_t, a_t, g_ppo_log_sigma,
-                                          adv_t, ratio, PPO_CLIP_EPS);
-#else
-                uint32_t a_t = buf->actions[t];
-                actor_forward(actor, obs_t, probs, &log_prob_new, a_t, &entropy);
-                float ratio = expf(fmaxf(fminf(log_prob_new - log_prob_old, 10.f), -10.f));
-                actor_backward(actor, obs_t, a_t, adv_t, ratio,
-                               PPO_CLIP_EPS, PPO_C2);
+#if TIME_LOG
+                uint32_t _tf, _tb;
 #endif
 
+#if USE_CONTINUOUS_ACTION
+                float *a_t = &buf->actions[t * N_ACT_DIMS];
+#if TIME_LOG
+                _tf = dwt_ticks();
+#endif
+                actor_forward_continuous(actor, obs_t, a_t, g_ppo_log_sigma,
+                                         &log_prob_new, &entropy);
+#if TIME_LOG
+                _fwd_cyc += dwt_delta(_tf, dwt_ticks());
+#endif
+                float ratio = expf(fmaxf(fminf(log_prob_new - log_prob_old, 10.f), -10.f));
+#if TIME_LOG
+                _tb = dwt_ticks();
+#endif
+                actor_backward_continuous(actor, obs_t, a_t, g_ppo_log_sigma,
+                                          adv_t, ratio, PPO_CLIP_EPS);
+#if TIME_LOG
+                _bwd_cyc += dwt_delta(_tb, dwt_ticks());
+#endif
+#else
+                uint32_t a_t = buf->actions[t];
+#if TIME_LOG
+                _tf = dwt_ticks();
+#endif
+                actor_forward(actor, obs_t, probs, &log_prob_new, a_t, &entropy);
+#if TIME_LOG
+                _fwd_cyc += dwt_delta(_tf, dwt_ticks());
+#endif
+                float ratio = expf(fmaxf(fminf(log_prob_new - log_prob_old, 10.f), -10.f));
+#if TIME_LOG
+                _tb = dwt_ticks();
+#endif
+                actor_backward(actor, obs_t, a_t, adv_t, ratio,
+                               PPO_CLIP_EPS, PPO_C2);
+#if TIME_LOG
+                _bwd_cyc += dwt_delta(_tb, dwt_ticks());
+#endif
+#endif
+
+#if TIME_LOG
+                _tf = dwt_ticks();
+#endif
                 critic_forward(critic, obs_t);
+#if TIME_LOG
+                _fwd_cyc += dwt_delta(_tf, dwt_ticks());
+                _tb = dwt_ticks();
+#endif
                 critic_backward(critic, obs_t, ret_t, PPO_C1);
+#if TIME_LOG
+                _bwd_cyc += dwt_delta(_tb, dwt_ticks());
+#endif
             }
 
+#if TIME_LOG
+            uint32_t _ta = dwt_ticks();
+#endif
             for (int l = 0; l < (int)actor->num_layers; l++) {
                 DenseLayer *la = &actor->layers[l];
                 for (int i = 0; i < la->out_dim; i++) {
@@ -255,10 +312,25 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
             network_clip_grad(critic);
             network_adam_update(actor, PPO_LR_ACTOR);
             network_adam_update(critic, PPO_LR_CRITIC);
+#if TIME_LOG
+            uint32_t _now = dwt_ticks();
+            _adam_cyc += dwt_delta(_ta, _now);
+            _tot_cyc  += dwt_delta(_t_chunk, _now);   /* chiude il pezzo di totale */
+            _t_chunk   = _now;
+#endif
         }
     }
 #if USE_CONTINUOUS_ACTION
     ppo_sigma_decay();
+#endif
+
+#if TIME_LOG
+    _tot_cyc += dwt_delta(_t_chunk, dwt_ticks());   /* coda dopo l'ultimo minibatch */
+
+    g_train_timing.adam_cycles     = _adam_cyc;
+    g_train_timing.forward_cycles  = _fwd_cyc;
+    g_train_timing.backward_cycles = _bwd_cyc;
+    g_train_timing.total_cycles    = _tot_cyc;
 #endif
 }
 

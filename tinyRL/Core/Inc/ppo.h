@@ -1,6 +1,7 @@
 #ifndef PPO_H
 #define PPO_H
 
+#include "main.h"   /* HAL della famiglia target + TIME_LOG */
 #include "neural_net.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -60,6 +61,23 @@ typedef struct {
     uint32_t  capacity;
     uint32_t  obs_dim;
 } RolloutBuffer;
+
+#if TIME_LOG
+/* Profiling: cicli DWT misurati dentro ppo_update (una chiamata = un update).
+ * total = intero update; forward = actor_forward+critic_forward sui minibatch;
+ * backward = actor_backward+critic_backward; adam = normalizzazione gradienti +
+ * network_clip_grad + network_adam_update (actor e critic).
+ * Accumulatori a 64 bit: il DWT e' a 32 bit e a 480 MHz wrappa ogni ~8.9 s,
+ * meno di quanto dura un update intero (8 epoche x ROLLOUT_STEPS campioni). */
+typedef struct {
+    uint64_t total_cycles;
+    uint64_t forward_cycles;
+    uint64_t backward_cycles;
+    uint64_t adam_cycles;
+} TrainTiming;
+
+extern TrainTiming g_train_timing;
+#endif /* TIME_LOG */
 
 int  rollout_buffer_init(RolloutBuffer *buf, uint32_t T, uint32_t obs_dim);
 #if USE_CONTINUOUS_ACTION

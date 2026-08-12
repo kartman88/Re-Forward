@@ -33,12 +33,9 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -51,7 +48,10 @@
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-
+#if TIME_LOG
+static uint32_t num_episode = 0;   /* episodi conclusi (done inviato al PC) */
+static uint32_t train_step  = 0;   /* update PPO eseguiti */
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -103,8 +103,46 @@ static uint8_t is_done(uint32_t step_in_ep) {
 static void on_train_begin(void) {
     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
 }
+#if TIME_LOG
+/* Una riga CSV di timing per ogni update, spedita subito dopo l'update stesso.
+ * Il PC la appende al file mentre il training prosegue: niente buffer da
+ * riempire e nessun dump unico da perdere, ogni riga e' indipendente. Formato:
+ *   <<<PROF>>>episode,steps,total_ms,forward_ms,backward_ms,adam_ms\n
+ * I tempi arrivano da g_train_timing (cicli a 64 bit) e vengono convertiti in
+ * microsecondi, poi stampati come ms con 3 decimali (us/1000 . us%1000): niente
+ * printf-float e niente long long, che newlib-nano non sempre supporta. */
+static void prof_emit_row(UART_HandleTypeDef *huart)
+{
+  char line[128];
+  uint32_t t = cycles64_to_us(g_train_timing.total_cycles);
+  uint32_t f = cycles64_to_us(g_train_timing.forward_cycles);
+  uint32_t b = cycles64_to_us(g_train_timing.backward_cycles);
+  uint32_t a = cycles64_to_us(g_train_timing.adam_cycles);
+
+  int n = snprintf(line, sizeof(line),
+                   "<<<PROF>>>%lu,%lu,%lu.%03lu,%lu.%03lu,%lu.%03lu,%lu.%03lu\n",
+                   (unsigned long)num_episode,
+                   (unsigned long)train_step,
+                   (unsigned long)(t / 1000), (unsigned long)(t % 1000),
+                   (unsigned long)(f / 1000), (unsigned long)(f % 1000),
+                   (unsigned long)(b / 1000), (unsigned long)(b % 1000),
+                   (unsigned long)(a / 1000), (unsigned long)(a % 1000));
+  HAL_UART_Transmit(huart, (uint8_t *)line, n, 1000);
+}
+#endif /* TIME_LOG */
+
 static void on_train_end(void) {
     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+#if TIME_LOG
+    /* I tempi (total/forward/backward/adam) di questo update sono in
+     * g_train_timing, misurati dentro ppo_update: spediamo la riga adesso, prima
+     * del flush RX qui sotto, cosi' il PC la legge nello stesso momento in cui
+     * torna a leggere l'azione. */
+    prof_emit_row(&huart3);
+    train_step++;
+#endif
+
     // Durante la pausa di training la UART e' andata in overrun e nella RX si
     // sono accumulati byte (ritrasmissioni del PC). Azzeriamo l'overrun e
     // svuotiamo la RX cosi' la lettura riparte allineata su un frame nuovo.
@@ -214,6 +252,11 @@ int main(void) {
 #else
     uint32_t act = ppo_step_discrete(&agent, obs);
     uart_send_float_action(&huart3, PENDULUM_TORQUES[act], agent.done, 100);
+#endif
+
+#if TIME_LOG
+    if (agent.done)
+        num_episode++;   /* colonna "episode" delle righe di timing */
 #endif
 
     /* USER CODE END WHILE */
