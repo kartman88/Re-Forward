@@ -75,7 +75,9 @@ void Error_Handler(void);
 #define LD2_GPIO_Port GPIOE
 
 /* USER CODE BEGIN Private defines */
-
+/* Profiling dei tempi di esecuzione di dqn_train: 1 = attivo, 0 = disattivo.
+ * Deve corrispondere al TIME_LOG di hil_trainer_log.py lato PC. */
+#define TIME_LOG 1
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

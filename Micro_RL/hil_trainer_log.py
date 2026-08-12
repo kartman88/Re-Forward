@@ -27,7 +27,15 @@ CONSOLE_LINES = 5
 
 # Logging CSV
 LOG_FOLDER   = "learning_curve_comparison"
-LOG_FILENAME = "training_mcu_11.csv"
+LOG_FILENAME = "training_mcu_x.csv"
+
+# Profiling: con TIME_LOG attivo la scheda invia una volta, a buffer pieno, il
+# CSV dei tempi di dqn_train racchiuso tra questi marcatori. Il PC lo cattura e
+# lo salva a parte. Deve corrispondere al TIME_LOG di Core/Inc/main.h.
+TIME_LOG = True
+PROF_CSV_FILENAME = "mcu_timings.csv"
+PROF_BEGIN = b"<<<PROF_BEGIN>>>"
+PROF_END   = b"<<<PROF_END>>>"
 
 # ------------------------------------------------------------
 #  DIMENSIONI TASK
@@ -64,20 +72,111 @@ def compute_reward(obs, action_val):
     u     = float(action_val)   # torque gia' ricevuto dal micro
     return -(theta * theta + 0.1 * omega * omega + 0.001 * u * u)
 
-def recv_action_done(ser: serial.Serial):
-    """Legge il frame di risposta. Ritorna (azione_decodificata, done) o None se incompleto."""
-    frame = ser.read(_ACTION_FRAME_LEN)
-    if len(frame) == _ACTION_FRAME_LEN and frame[0] == 0x02 and frame[-1] == 0x03:
-        
-        # Estrae i byte dell'azione e li spacchetta nel tipo corretto (float o int)
-        action_bytes = frame[1:1 + ACTION_BYTE_SIZE]
-        action_val = struct.unpack(_ACTION_STRUCT, action_bytes)[0]
-        
-        # Estrae il done flag (penultimo byte)
-        done_flag = bool(frame[-2])
-        
-        return (action_val, done_flag)
+# Buffer di ricezione persistente: sullo stesso stream arrivano sia i frame
+# azione binari sia (una volta) il blocco di profiling testuale. Accumuliamo i
+# byte e li interpretiamo senza perdere l'allineamento.
+_rx = bytearray()
+_prof_saved = False
+
+
+def _try_save_prof(prof_path: str):
+    """Estrae dal buffer i blocchi di profiling completi (BEGIN...END) e li
+    rimuove. Il micro ripete il dump per qualche episodio in caso di caduta del
+    link: solo il primo blocco completo viene salvato su prof_path."""
+    global _prof_saved
+    while True:
+        b = _rx.find(PROF_BEGIN)
+        if b < 0:
+            return
+        e = _rx.find(PROF_END, b + len(PROF_BEGIN))
+        nxt = _rx.find(PROF_BEGIN, b + len(PROF_BEGIN))
+        if nxt >= 0 and (e < 0 or nxt < e):
+            # Un nuovo dump e' iniziato prima che il precedente si chiudesse: il
+            # primo e' troncato (link caduto a meta' trasmissione). Scarta solo
+            # il marcatore orfano, il testo residuo lo smaltisce lo scanner dei
+            # frame senza inghiottire i frame azione che stanno in mezzo.
+            del _rx[b:b + len(PROF_BEGIN)]
+            continue
+        if e < 0:
+            return  # blocco non ancora arrivato per intero
+        block = bytes(_rx[b + len(PROF_BEGIN):e]).decode("ascii", errors="replace")
+        del _rx[b:e + len(PROF_END)]
+        if not _prof_saved:
+            with open(prof_path, "w", newline="") as f:
+                f.write(block.strip("\r\n") + "\n")
+            _prof_saved = True
+            n_rows = max(block.count("\n") - 1, 0)  # meno la riga di header
+            print(f"\n[PC] Timing MCU salvati in {prof_path} ({n_rows} misure)")
+
+
+def recv_action_done(ser: serial.Serial, prof_path: str = None):
+    """Legge dallo stream. Ritorna (azione_decodificata, done) se un frame azione
+    valido e' pronto, altrimenti None. Cattura anche il blocco di profiling verso
+    prof_path senza perdere l'allineamento dei frame binari."""
+    global _rx
+    data = ser.read(ser.in_waiting or _ACTION_FRAME_LEN)
+    if data:
+        _rx.extend(data)
+
+    # 1. Cattura eventuale blocco di profiling (CSV ASCII inviato una sola volta).
+    if prof_path is not None:
+        _try_save_prof(prof_path)
+
+    # 2. Cerca un frame azione valido: STX ... ETX alla posizione attesa.
+    i = _rx.find(b'\x02')
+    while i >= 0 and len(_rx) - i >= _ACTION_FRAME_LEN:
+        frame = _rx[i:i + _ACTION_FRAME_LEN]
+        if frame[-1] == 0x03:
+            action_bytes = frame[1:1 + ACTION_BYTE_SIZE]
+            action_val = struct.unpack(_ACTION_STRUCT, action_bytes)[0]
+            done_flag = bool(frame[-2])
+            del _rx[:i + _ACTION_FRAME_LEN]   # consuma fino a fine frame
+            return (action_val, done_flag)
+        i = _rx.find(b'\x02', i + 1)          # falso STX, riprova dal successivo
+
+    # 3. Nessun frame: evita crescita illimitata del buffer (ma non tagliare un
+    #    blocco di profiling in arrivo).
+    if len(_rx) > 8192 and PROF_BEGIN not in _rx:
+        del _rx[:-64]
     return None
+
+def open_serial():
+    """Apre la porta seriale. Solleva l'eccezione se non e' disponibile."""
+    ser = serial.Serial(PORT, BAUDRATE, timeout=SER_TIMEOUT_S)
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+    return ser
+
+
+def reopen_serial(old_ser):
+    """Il VCP dell'ST-Link puo' sparire e ri-enumerare (USB disconnect): in quel
+    caso read/write falliscono con EIO. Chiude e riapre la porta finche' non
+    torna disponibile, senza perdere il training gia' fatto sul micro."""
+    try:
+        old_ser.close()
+    except Exception:
+        pass
+    _rx.clear()   # il buffer parziale non e' piu' allineato allo stream
+    print("\n[PC] Seriale caduta (USB disconnect?): attendo che la porta torni...")
+    while True:
+        try:
+            ser = open_serial()
+            print("[PC] Seriale ripristinata, riprendo.")
+            return ser
+        except Exception:
+            time.sleep(0.5)
+
+
+def save_episode_log(episode_log):
+    """Scrive la curva di apprendimento. Chiamata a ogni fine episodio cosi' un
+    crash non porta via i dati gia' raccolti."""
+    os.makedirs(LOG_FOLDER, exist_ok=True)
+    csv_path = os.path.join(LOG_FOLDER, LOG_FILENAME)
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["episode", "reward"])
+        w.writerows(episode_log)
+
 
 def clear_console():
     """Pulisce il terminale"""
@@ -89,9 +188,7 @@ def clear_console():
 def main():
     print(f"[PC] Apertura seriale su {PORT} a {BAUDRATE} baud...")
     try:
-        ser = serial.Serial(PORT, BAUDRATE, timeout=SER_TIMEOUT_S)
-        ser.reset_input_buffer()
-        ser.reset_output_buffer()
+        ser = open_serial()
     except Exception as e:
         print(f"Errore apertura seriale: {e}")
         return
@@ -131,6 +228,12 @@ def main():
 
     # Setup CSV
     episode_log = []
+    # Path dove salvare i tempi di training che la scheda dumpa a buffer pieno.
+    if TIME_LOG:
+        os.makedirs(LOG_FOLDER, exist_ok=True)
+        prof_path = os.path.join(LOG_FOLDER, PROF_CSV_FILENAME)
+    else:
+        prof_path = None
 
     # Variabili di stato
     episode_count = 0
@@ -157,13 +260,21 @@ def main():
                 now_ms = time.time() * 1000
 
                 # 1. Ritrasmissione robusta
-                if (not state_sent) or (now_ms - last_tx_ms > MAX_WAIT_MS):
-                    send_state(ser, obs)
-                    last_tx_ms = now_ms
-                    state_sent = True
+                #    (una caduta della seriale non interrompe la sessione: si
+                #     riapre la porta e si riparte dallo stato corrente)
+                try:
+                    if (not state_sent) or (now_ms - last_tx_ms > MAX_WAIT_MS):
+                        send_state(ser, obs)
+                        last_tx_ms = now_ms
+                        state_sent = True
 
-                # 2. Prova a leggere la risposta
-                pkt = recv_action_done(ser)
+                    # 2. Prova a leggere la risposta (e cattura il blocco profiling)
+                    pkt = recv_action_done(ser, prof_path)
+                except (serial.SerialException, OSError):
+                    ser = reopen_serial(ser)
+                    state_sent = False
+                    continue
+
                 if pkt is None:
                     time.sleep(SEND_PERIOD_MS / 1000.0) 
                     continue
@@ -208,6 +319,7 @@ def main():
 
             # ---- FINE EPISODIO ----
             episode_log.append((episode_count, current_ep_reward))
+            save_episode_log(episode_log)   # salvataggio incrementale
             reward_history.append(current_ep_reward)
             moving_avg_queue.append(current_ep_reward)
             current_avg = np.mean(moving_avg_queue)
@@ -265,13 +377,11 @@ def main():
         print("\n[PC] Training interrotto dall'utente. Risorse liberate.")
     finally:
         env.close()
-        ser.close()
-        os.makedirs(LOG_FOLDER, exist_ok=True)
-        csv_path = os.path.join(LOG_FOLDER, LOG_FILENAME)
-        with open(csv_path, "w", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["episode", "reward"])
-            w.writerows(episode_log)
+        try:
+            ser.close()
+        except Exception:
+            pass
+        save_episode_log(episode_log)
         plt.ioff()
         plt.show()
 

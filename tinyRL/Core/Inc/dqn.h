@@ -2,7 +2,7 @@
 #define DQN_H
 
 #include "neural_net.h"
-#include "stm32h7xx_hal.h"
+#include "main.h"   /* HAL della famiglia target (stm32h7xx_hal.h) + TIME_LOG */
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,6 +19,20 @@ typedef struct {
     uint32_t  capacity;
     uint32_t  obs_dim;
 } ReplayBuffer;
+
+#if TIME_LOG
+/* Profiling: cicli DWT misurati dentro dqn_train (una chiamata = un update).
+ * total = intero update; forward = forward_q+forward_target sul batch;
+ * backward = dqn_backward sul batch; adam = gradient_norm_q+adam_optimizer_q. */
+typedef struct {
+    uint32_t total_cycles;
+    uint32_t forward_cycles;
+    uint32_t backward_cycles;
+    uint32_t adam_cycles;
+} TrainTiming;
+
+extern TrainTiming g_train_timing;
+#endif /* TIME_LOG */
 
 int  replay_buffer_init(ReplayBuffer *buf, uint32_t capacity, uint32_t obs_dim);
 void replay_buffer_push(ReplayBuffer *buf, float *s, uint32_t action,

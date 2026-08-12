@@ -1,5 +1,10 @@
 #include "dqn.h"
 #include "rng.h"
+#if TIME_LOG
+#include "utils.h"   /* dwt_ticks / dwt_delta per il profiling */
+
+TrainTiming g_train_timing = {0};
+#endif
 
 int replay_buffer_init(ReplayBuffer *buf, uint32_t capacity, uint32_t obs_dim) {
     buf->capacity = capacity;
@@ -93,6 +98,13 @@ void dqn_train(QNetwork *online, TargetNetwork *target,
     float q_tgt[N_ACTIONS];
     float inv_batch = 1.0f / (float)batch_size;
 
+#if TIME_LOG
+    /* --- profiling: azzera e avvia i contatori DWT --- */
+    g_train_timing = (TrainTiming){0};
+    uint32_t _t_total = dwt_ticks();
+    uint32_t _fwd_cyc = 0, _bwd_cyc = 0;
+#endif
+
     zero_grad_q(online);
 
     for (uint32_t b = 0; b < batch_size; b++) {
@@ -103,8 +115,14 @@ void dqn_train(QNetwork *online, TargetNetwork *target,
         float    rew    = buf->reward[idx];
         uint8_t  dn     = buf->done[idx];
 
+#if TIME_LOG
+        uint32_t _tf = dwt_ticks();
+#endif
         forward_q(online, s, q_online);
         forward_target(target, s_next, q_tgt);
+#if TIME_LOG
+        _fwd_cyc += dwt_delta(_tf, dwt_ticks());
+#endif
 
         float max_qt = q_tgt[0];
         for (uint32_t i = 1; i < n_actions; i++)
@@ -113,9 +131,25 @@ void dqn_train(QNetwork *online, TargetNetwork *target,
         float target_val = dn ? rew : rew + GAMMA * max_qt;
         float td_error   = q_online[act] - target_val;
 
+#if TIME_LOG
+        uint32_t _tb = dwt_ticks();
+#endif
         dqn_backward(online, s, act, td_error * inv_batch);
+#if TIME_LOG
+        _bwd_cyc += dwt_delta(_tb, dwt_ticks());
+#endif
     }
 
+#if TIME_LOG
+    uint32_t _ta = dwt_ticks();
+#endif
     gradient_norm_q(online);
     adam_optimizer_q(online);
+#if TIME_LOG
+    g_train_timing.adam_cycles     = dwt_delta(_ta, dwt_ticks());
+
+    g_train_timing.forward_cycles  = _fwd_cyc;
+    g_train_timing.backward_cycles = _bwd_cyc;
+    g_train_timing.total_cycles    = dwt_delta(_t_total, dwt_ticks());
+#endif
 }

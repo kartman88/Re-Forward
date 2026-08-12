@@ -32,12 +32,19 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+#if TIME_LOG
+typedef struct { uint32_t episode, steps, total, forward, backward, adam; } prof_entry_t;
+#endif
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#if TIME_LOG
+#define PROF_N 50           /* numero di update DQN da profilare prima del dump UART */
+#define PROF_DUMP_REPEAT 5  /* ripetizioni del dump: se il link cade durante la
+                             * trasmissione il PC ha altre occasioni di riceverlo
+                             * (salva solo il primo blocco completo). */
+#endif
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,7 +57,11 @@
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-
+#if TIME_LOG
+static prof_entry_t prof_buf[PROF_N];   /* struttura statica: 50 tempi di update */
+static uint32_t     prof_count = 0;
+static uint8_t      prof_sent  = 0;
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,6 +84,44 @@ static float evaluate_reward_pendulum(const float *obs, uint32_t act) {
     float u     = PENDULUM_TORQUES[act];
     return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u);
 }
+
+#if TIME_LOG
+/* Dump del buffer di profiling come CSV ASCII, racchiuso tra i marcatori che
+ * il parser lato PC cerca. Formato:
+ *   <<<PROF_BEGIN>>>header\n riga\n ... <<<PROF_END>>>
+ * (nessun \n subito dopo BEGIN, cosi' block.count("\n")-1 == numero di righe). */
+static void prof_dump_csv(UART_HandleTypeDef *huart)
+{
+  char line[96];
+  const char *begin = "<<<PROF_BEGIN>>>";
+  const char *end   = "<<<PROF_END>>>";
+
+  HAL_UART_Transmit(huart, (uint8_t *)begin, strlen(begin), 1000);
+
+  int n = snprintf(line, sizeof(line),
+                   "episode,steps,total_ms,forward_ms,backward_ms,adam_ms\n");
+  HAL_UART_Transmit(huart, (uint8_t *)line, n, 1000);
+
+  for (uint32_t i = 0; i < prof_count; i++) {
+    /* cicli -> microsecondi interi, poi stampati come ms con 3 decimali
+       (us/1000 . us%1000): niente printf-float, nessun flag di linker extra. */
+    uint32_t t = cycles_to_us(prof_buf[i].total);
+    uint32_t f = cycles_to_us(prof_buf[i].forward);
+    uint32_t b = cycles_to_us(prof_buf[i].backward);
+    uint32_t a = cycles_to_us(prof_buf[i].adam);
+    n = snprintf(line, sizeof(line),
+                 "%lu,%lu,%lu.%03lu,%lu.%03lu,%lu.%03lu,%lu.%03lu\n",
+                 (unsigned long)prof_buf[i].episode,
+                 (unsigned long)prof_buf[i].steps,
+                 (unsigned long)(t / 1000), (unsigned long)(t % 1000),
+                 (unsigned long)(f / 1000), (unsigned long)(f % 1000),
+                 (unsigned long)(b / 1000), (unsigned long)(b % 1000),
+                 (unsigned long)(a / 1000), (unsigned long)(a % 1000));
+    HAL_UART_Transmit(huart, (uint8_t *)line, n, 1000);
+  }
+  HAL_UART_Transmit(huart, (uint8_t *)end, strlen(end), 1000);
+}
+#endif /* TIME_LOG */
 /* USER CODE END 0 */
 
 /**
@@ -169,6 +218,19 @@ int main(void) {
     if (replay.size >= REPLAY_MIN) {
         HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
         dqn_train(&online, &target, &replay, BATCH_SIZE, N_ACTIONS);
+#if TIME_LOG
+        /* --- profiling: i tempi (total/forward/backward/adam) del singolo
+         *     update sono in g_train_timing, misurati dentro dqn_train --- */
+        if (prof_count < PROF_N) {
+            prof_buf[prof_count].episode  = num_episode;
+            prof_buf[prof_count].steps    = train_step;
+            prof_buf[prof_count].total    = g_train_timing.total_cycles;
+            prof_buf[prof_count].forward  = g_train_timing.forward_cycles;
+            prof_buf[prof_count].backward = g_train_timing.backward_cycles;
+            prof_buf[prof_count].adam     = g_train_timing.adam_cycles;
+            prof_count++;
+        }
+#endif
         train_step++;
         if (train_step % TARGET_UPDATE == 0)
             copy_weights_to_target(&online, &target);
@@ -188,6 +250,15 @@ int main(void) {
         first_step = 1;
         step_in_ep = 0;
         num_episode++;
+#if TIME_LOG
+        /* buffer pieno: invia il CSV dei tempi a fine episodio (boundary pulito
+         * per il parser lato PC), ripetendolo per qualche episodio in caso di
+         * caduta del link. */
+        if (prof_count == PROF_N && prof_sent < PROF_DUMP_REPEAT) {
+            prof_dump_csv(&huart3);
+            prof_sent++;
+        }
+#endif
     } else {
         step_in_ep++;
     }
