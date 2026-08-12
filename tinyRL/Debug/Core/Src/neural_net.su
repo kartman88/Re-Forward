@@ -1,0 +1,15 @@
+../Core/Src/neural_net.c:6:6:softmax	56	static
+../Core/Src/neural_net.c:24:20:forward_dense_layer	56	static
+../Core/Src/neural_net.c:44:13:adam_update_single_layer	112	static
+../Core/Src/neural_net.c:80:5:network_init	40	static
+../Core/Src/neural_net.c:97:5:network_forward	32	static
+../Core/Src/neural_net.c:110:13:backward_from_delta	96	static
+../Core/Src/neural_net.c:160:6:actor_backward	96	static
+../Core/Src/neural_net.c:187:6:critic_backward	32	static
+../Core/Src/neural_net.c:192:6:network_zero_grad	32	static
+../Core/Src/neural_net.c:201:6:network_clip_grad	80	static
+../Core/Src/neural_net.c:237:6:network_adam_update	32	static
+../Core/Src/neural_net.c:249:6:actor_forward_continuous	80	static
+../Core/Src/neural_net.c:280:6:actor_backward_continuous	80	static
+../Core/Src/neural_net.c:308:6:actor_forward	48	static
+../Core/Src/neural_net.c:322:7:critic_forward	16	static
