@@ -9,7 +9,7 @@ RM := rm -rf
 
 # All of the sources participating in the build are defined here
 -include sources.mk
--include Drivers/STM32H7xx_HAL_Driver/Src/subdir.mk
+-include Drivers/STM32F4xx_HAL_Driver/Src/subdir.mk
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
 -include objects.mk
@@ -60,8 +60,8 @@ all: main-build
 main-build: tinyRL.elf secondary-outputs
 
 # Tool invocations
-tinyRL.elf tinyRL.map: $(OBJS) $(USER_OBJS) /home/tano/Desktop/Code/Re-Forward/tinyRL/STM32H743ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "tinyRL.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"/home/tano/Desktop/Code/Re-Forward/tinyRL/STM32H743ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="tinyRL.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+tinyRL.elf tinyRL.map: $(OBJS) $(USER_OBJS) /home/tano/Desktop/Code/Re-Forward/tinyRL/STM32F446RETX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "tinyRL.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m4 -T"/home/tano/Desktop/Code/Re-Forward/tinyRL/STM32F446RETX_FLASH.ld" --specs=nosys.specs -Wl,-Map="tinyRL.map" -Wl,--gc-sections -static -u _printf_float --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

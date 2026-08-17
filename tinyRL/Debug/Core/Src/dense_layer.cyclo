@@ -1,4 +1,5 @@
+../Core/Src/dense_layer.c:13:21:frand	1
 ../Core/Src/dense_layer.c:15:5:free_2d	6
 ../Core/Src/dense_layer.c:31:5:alloc_2d	8
-../Core/Src/dense_layer.c:52:6:init_layer_params	7
-../Core/Src/dense_layer.c:82:5:dense_init	5
+../Core/Src/dense_layer.c:52:6:init_layer_params	3
+../Core/Src/dense_layer.c:82:5:dense_init	10

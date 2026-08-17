@@ -23,9 +23,11 @@
 /* USER CODE BEGIN Includes */
 #include "neural_net.h"
 #include "dqn.h"
+#include "uart.h"
 #include "rng.h"
 #include "utils.h"
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 
 /* USER CODE END Includes */
@@ -54,7 +56,7 @@ typedef struct { uint32_t episode, steps, total, forward, backward, adam; } prof
 
 /* Private variables ---------------------------------------------------------*/
 
-UART_HandleTypeDef huart3;
+UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 #if TIME_LOG
@@ -66,15 +68,32 @@ static uint8_t      prof_sent  = 0;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MPU_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_USART3_UART_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 #define MAX_STEPS_PER_EP  200
+
+/* Topologia della rete Q (e della sua copia target): OBS_DIM -> HIDDEN_DIM ->
+ * HIDDEN_DIM -> N_ACTIONS.
+ *
+ * Sull'H7 l'hidden era 64; qui scende a 32 perche' la NUCLEO-F446RE ha 128 KB
+ * di SRAM in tutto contro i 512 KB di RAM_D1 usati sull'H7. Tolti .data+.bss
+ * (6.6 KB) e la riserva di stack del linker script (4 KB) restano ~117.4 KB di
+ * heap, e con hidden 64 + REPLAY_SIZE 1000 ne servirebbero ~141 KB (rete online
+ * 80 KB fra W/dW/mW/vW, target 20.5 KB, replay buffer 40 KB, header di
+ * nano-malloc inclusi): init_qnetwork/replay_buffer_init non potrebbero
+ * riuscire. Con hidden 32 il conto scende a ~71 KB (24.4 + 6.4 + 40.1) e il
+ * replay buffer resta intatto a 1000 transizioni come sull'H7; e' anche la
+ * stessa scelta della branch PPO_F446, quindi le curve fra algoritmi restano
+ * confrontabili a parita' di rete.
+ * Altre configurazioni che entrerebbero, se servisse una rete piu' larga:
+ *   HIDDEN_DIM 48, REPLAY_SIZE 1000 -> 101.0 KB (margine 16.4 KB)
+ *   HIDDEN_DIM 64, REPLAY_SIZE  400 -> 117.0 KB (margine  0.4 KB, al limite) */
+#define HIDDEN_DIM  32
 
 static const float PENDULUM_TORQUES[N_ACTIONS] = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
 
@@ -83,6 +102,18 @@ static float evaluate_reward_pendulum(const float *obs, uint32_t act) {
     float omega = obs[2];
     float u     = PENDULUM_TORQUES[act];
     return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u);
+}
+
+/* Fine dell'update di training: la UART e' rimasta cieca per tutta la durata di
+ * dqn_train e nel frattempo il PC ha ritrasmesso l'osservazione, mandando la RX
+ * in overrun. Azzeriamo ORE e svuotiamo il registro di ricezione cosi' la
+ * lettura successiva riparte allineata su un frame nuovo.
+ * Sull'USART della serie F4 non esiste la richiesta di flush della FIFO
+ * (l'H7 usa UART_RXDATA_FLUSH_REQUEST): il registro di ricezione e' un solo
+ * byte, quindi leggere SR+DR azzera ORE e scarta il byte residuo. */
+static void uart_rx_resync(UART_HandleTypeDef *huart) {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_FLUSH_DRREGISTER(huart);
 }
 
 #if TIME_LOG
@@ -131,11 +162,9 @@ static void prof_dump_csv(UART_HandleTypeDef *huart)
 int main(void) {
 
   /* USER CODE BEGIN 1 */
-
+  /* Il Cortex-M4 della F446 non ha cache L1 ne' MPU da configurare: la
+   * MPU_Config() del build H7 sparisce. */
   /* USER CODE END 1 */
-
-  /* MPU Configuration--------------------------------------------------------*/
-  MPU_Config();
 
   /* MCU Configuration--------------------------------------------------------*/
 
@@ -156,7 +185,7 @@ int main(void) {
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART3_UART_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   dwt_init();
   rng_seed(HAL_GetTick());
@@ -165,21 +194,36 @@ int main(void) {
   TargetNetwork target;
   ReplayBuffer  replay;
 
-  int topology[]        = {OBS_DIM, 64, 64, N_ACTIONS};
+  int topology[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, N_ACTIONS};
   ActivationType acts[] = {ACT_RELU, ACT_RELU, ACT_NONE};
 
-  int init_ok = init_qnetwork(&online, 4, topology, acts) &&
-                init_target_network(&target, 4, topology) &&
+  int init_ok = init_qnetwork(&online, sizeof(topology) / sizeof(topology[0]),
+                             topology, acts) &&
+                init_target_network(&target,
+                                    sizeof(topology) / sizeof(topology[0]),
+                                    topology) &&
                 replay_buffer_init(&replay, REPLAY_SIZE, OBS_DIM);
 
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0,  GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
   if (init_ok) {
       copy_weights_to_target(&online, &target);
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = ready
   } else {
-      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);  // LD3 = alloc fail
-      while (1);
+      /* Heap esaurito: la topologia/replay richiesti non entrano nei 128 KB di
+       * SRAM (vedi il commento su HIDDEN_DIM). La NUCLEO-F446RE ha un solo LED
+       * utente (LD2, PA5): lo facciamo lampeggiare veloce - distinguibile dal
+       * LED acceso fisso durante gli update - e diciamo sulla seriale cos'e'
+       * andato storto, cosi' l'errore non e' muto. */
+      char err[64];
+      int  n = snprintf(err, sizeof(err),
+                        "<<<ERR>>>ALLOC hidden=%d replay=%d\n",
+                        (int)HIDDEN_DIM, (int)REPLAY_SIZE);
+      while (1) {
+          HAL_UART_Transmit(&huart2, (uint8_t *)err, n, 1000);
+          for (int i = 0; i < 5; i++) {
+              HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+              HAL_Delay(100);
+          }
+      }
   }
 
   float    obs[OBS_DIM];
@@ -198,7 +242,7 @@ int main(void) {
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
-    if (!uart_recv_floats(&huart3, obs, OBS_DIM, 100))
+    if (!uart_recv_floats(&huart2, obs, OBS_DIM, 100))
         continue;
 
     int obs_ok = 1;
@@ -235,6 +279,9 @@ int main(void) {
         if (train_step % TARGET_UPDATE == 0)
             copy_weights_to_target(&online, &target);
         HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+        /* A 180 MHz l'update dura comunque piu' che sull'H7 a 480 MHz: la RX e'
+         * sicuramente in overrun, va risincronizzata prima di rispondere. */
+        uart_rx_resync(&huart2);
     }
 
     epsilon = calc_epsilon(step_total);
@@ -243,7 +290,7 @@ int main(void) {
     memcpy(prev_obs, obs, OBS_DIM * sizeof(float));
     first_step = 0;
 
-    uart_send_float_action(&huart3, PENDULUM_TORQUES[action], manual_done, 100);
+    uart_send_float_action(&huart2, PENDULUM_TORQUES[action], manual_done, 100);
 
     if (manual_done) {
         memset(prev_obs, 0, sizeof(prev_obs));
@@ -255,8 +302,9 @@ int main(void) {
          * per il parser lato PC), ripetendolo per qualche episodio in caso di
          * caduta del link. */
         if (prof_count == PROF_N && prof_sent < PROF_DUMP_REPEAT) {
-            prof_dump_csv(&huart3);
+            prof_dump_csv(&huart2);
             prof_sent++;
+            uart_rx_resync(&huart2);   /* il dump e' lungo: RX di nuovo in overrun */
         }
 #endif
     } else {
@@ -278,91 +326,97 @@ void SystemClock_Config(void) {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
-
-  /* VOS1 richiesto per 480 MHz */
+  /** Configure the main internal regulator output voltage
+   */
+  /* VOS1 (scale 1) e' richiesto per salire oltre i 144 MHz: gli altri build
+   * F446, fermi a 84 MHz, usavano VOS3. */
+  __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  /* HSI 64 MHz → PLL1: DIVM=4 (16 MHz), DIVN=60 (960 MHz VCO), DIVP=2 → 480 MHz SYSCLK */
-  RCC_OscInitStruct.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState            = RCC_HSI_DIV1;
+  /** Initializes the RCC Oscillators according to the specified parameters
+   * in the RCC_OscInitTypeDef structure.
+   */
+  /* HSI 16 MHz -> PLL: M=8 (2 MHz all'ingresso del VCO), N=180 (VCO 360 MHz),
+   * P=2 -> 180 MHz SYSCLK, il massimo della F446 (l'H7 girava a 480 MHz).
+   * NB: gli altri build F446 (REINFORCE su main, PPO su PPO_F446) girano a
+   * 84 MHz, quindi i tempi di training di questa branch NON sono direttamente
+   * confrontabili con i loro: per confrontarli va applicata la stessa
+   * configurazione di clock anche la'. */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState        = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource       = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM            = 4;
-  RCC_OscInitStruct.PLL.PLLN            = 60;
-  RCC_OscInitStruct.PLL.PLLP            = 2;   /* SYSCLK = 480 MHz */
-  RCC_OscInitStruct.PLL.PLLQ            = 4;   /* 240 MHz, disponibile per periferiche */
-  RCC_OscInitStruct.PLL.PLLR            = 2;
-  RCC_OscInitStruct.PLL.PLLRGE          = RCC_PLL1VCIRANGE_3; /* VCI 8–16 MHz */
-  RCC_OscInitStruct.PLL.PLLVCOSEL       = RCC_PLL1VCOWIDE;    /* VCO 192–960 MHz */
-  RCC_OscInitStruct.PLL.PLLFRACN        = 0;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 180;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
     Error_Handler();
   }
 
-  /* SYSCLK = PLL1P = 480 MHz
-     AHB = 240 MHz (DIV2), APB1/2/3/4 = 120 MHz (DIV2) */
-  RCC_ClkInitStruct.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                                     RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
-                                     RCC_CLOCKTYPE_D3PCLK1 | RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.SYSCLKDivider  = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider  = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+  /** Activate the Over-Drive mode
+   */
+  /* Obbligatoria sopra i 168 MHz e da abilitare proprio qui: il PLL e' gia'
+   * configurato ma il SYSCLK non ci e' ancora sopra. */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-  /* Flash latency 4 cicli richiesti a 480 MHz VOS1 */
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) {
+  /** Initializes the CPU, AHB and APB buses clocks
+   */
+  /* HCLK = 180 MHz; i bus periferici hanno un tetto proprio, PCLK1 45 MHz e
+   * PCLK2 90 MHz, quindi i divisori salgono a 4 e 2. */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+
+  /* 5 wait state: a 2.7-3.6 V la flash regge 30 MHz per WS, quindi 180 MHz ne
+   * richiede 5 (a 84 MHz bastavano 2). Prefetch e ART accelerator sono attivi
+   * da stm32f4xx_hal_conf.h, cosi' la latenza pesa poco sul codice lineare. */
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+  {
     Error_Handler();
   }
 }
 
 /**
- * @brief USART3 Initialization Function
+ * @brief USART2 Initialization Function
  * @param None
  * @retval None
  */
-static void MX_USART3_UART_Init(void) {
+static void MX_USART2_UART_Init(void)
+{
 
-  /* USER CODE BEGIN USART3_Init 0 */
+  /* USER CODE BEGIN USART2_Init 0 */
 
-  /* USER CODE END USART3_Init 0 */
+  /* USER CODE END USART2_Init 0 */
 
-  /* USER CODE BEGIN USART3_Init 1 */
+  /* USER CODE BEGIN USART2_Init 1 */
 
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart3) != HAL_OK) {
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
     Error_Handler();
   }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) !=
-      HAL_OK) {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) !=
-      HAL_OK) {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK) {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART3_Init 2 */
+  /* USER CODE BEGIN USART2_Init 2 */
 
-  /* USER CODE END USART3_Init 2 */
+  /* USER CODE END USART2_Init 2 */
+
 }
 
 /**
@@ -370,38 +424,26 @@ static void MX_USART3_UART_Init(void) {
  * @param None
  * @retval None
  */
-static void MX_GPIO_Init(void) {
+static void MX_GPIO_Init(void)
+{
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
+/* USER CODE BEGIN MX_GPIO_Init_1 */
+/* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD1_Pin | LD3_Pin, GPIO_PIN_RESET);
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : LD1_Pin LD3_Pin */
-  GPIO_InitStruct.Pin = LD1_Pin | LD3_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LD2_Pin */
   GPIO_InitStruct.Pin = LD2_Pin;
@@ -410,41 +452,13 @@ static void MX_GPIO_Init(void) {
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
+/* USER CODE BEGIN MX_GPIO_Init_2 */
+/* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
-
-/* MPU Configuration */
-
-void MPU_Config(void) {
-  MPU_Region_InitTypeDef MPU_InitStruct = {0};
-
-  /* Disables the MPU */
-  HAL_MPU_Disable();
-
-  /** Initializes and configures the Region and the memory to be protected
-   */
-  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number = MPU_REGION_NUMBER0;
-  MPU_InitStruct.BaseAddress = 0x0;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
-  MPU_InitStruct.SubRegionDisable = 0x87;
-  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
-  MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
-  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
-  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
-
-  HAL_MPU_ConfigRegion(&MPU_InitStruct);
-  /* Enables the MPU */
-  HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
-}
 
 /**
  * @brief  This function is executed in case of error occurrence.

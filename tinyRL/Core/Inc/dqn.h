@@ -2,7 +2,7 @@
 #define DQN_H
 
 #include "neural_net.h"
-#include "main.h"   /* HAL della famiglia target (stm32h7xx_hal.h) + TIME_LOG */
+#include "main.h"   /* HAL della famiglia target (stm32f4xx_hal.h) + TIME_LOG */
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,7 +23,10 @@ typedef struct {
 #if TIME_LOG
 /* Profiling: cicli DWT misurati dentro dqn_train (una chiamata = un update).
  * total = intero update; forward = forward_q+forward_target sul batch;
- * backward = dqn_backward sul batch; adam = gradient_norm_q+adam_optimizer_q. */
+ * backward = dqn_backward sul batch; adam = gradient_norm_q+adam_optimizer_q.
+ * Contatori a 32 bit: il DWT wrappa ogni ~23.9 s a 180 MHz, mentre un singolo
+ * update DQN (batch di 32 transizioni) sta nell'ordine dei millisecondi, quindi
+ * un update non arriva mai a wrappare. */
 typedef struct {
     uint32_t total_cycles;
     uint32_t forward_cycles;
@@ -38,12 +41,8 @@ int  replay_buffer_init(ReplayBuffer *buf, uint32_t capacity, uint32_t obs_dim);
 void replay_buffer_push(ReplayBuffer *buf, float *s, uint32_t action,
                         float reward, float *s_next, uint8_t done);
 
-int  uart_recv_floats(UART_HandleTypeDef *huart, float *dst, size_t dim,
-                      uint32_t timeout);
-int  uart_send_float_action(UART_HandleTypeDef *huart, float action_val,
-                            uint8_t done, uint32_t timeout);
-int  uart_send_action_discrete(UART_HandleTypeDef *huart, uint32_t action,
-                               uint8_t done, uint32_t timeout);
+/* I wrapper del protocollo seriale vivono in uart.c (condiviso con le altre
+ * branch del port F446), non piu' qui: vedi Core/Inc/uart.h. */
 
 float    calc_epsilon(uint32_t step);
 uint32_t dqn_select_action(QNetwork *net, float *obs, float epsilon,

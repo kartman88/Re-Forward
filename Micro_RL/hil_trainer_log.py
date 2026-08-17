@@ -60,9 +60,18 @@ _ACTION_FRAME_LEN = 1 + ACTION_BYTE_SIZE + 1 + 1   # 0x02 + action_bytes + done 
 #  FUNZIONI SERIALI
 # ------------------------------------------------------------
 def send_state(ser: serial.Serial, obs: np.ndarray):
-    """Invia gli OBS_DIM float32 in little-endian tra 0x02 e 0x03"""
+    """Invia gli OBS_DIM float32 LE: STX + payload + checksum(XOR) + ETX.
+
+    Il checksum + ETX permettono al micro (uart_recv_floats in Core/Src/uart.c)
+    di scartare i frame disallineati che si accumulano durante la pausa di
+    dqn_train (overrun UART): senza di essi un frame spazzatura passerebbe i
+    controlli e finirebbe nel replay buffer.
+    """
     payload = struct.pack(_STATE_STRUCT, *obs.astype(np.float32))
-    ser.write(b'\x02' + payload + b'\x03')
+    chk = 0
+    for b in payload:
+        chk ^= b
+    ser.write(b'\x02' + payload + bytes([chk]) + b'\x03')
 
 def compute_reward(obs, action_val):
     """Replica di evaluate_reward_pendulum() del micro (main.c, Pendulum-v1).

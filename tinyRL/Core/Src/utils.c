@@ -51,3 +51,12 @@ uint32_t cycles_to_us(uint32_t cycles){
 uint32_t cycles_to_ns(uint32_t cycles){
     return (uint32_t)(( (uint64_t)cycles * 1000000000ULL + (SystemCoreClock/2) ) / SystemCoreClock);
 }
+
+/* Come cycles_to_us ma su un accumulo a 64 bit: il DWT e' a 32 bit e a 180 MHz
+ * wrappa ogni ~23.9 s, potenzialmente meno della durata di un update intero
+ * (serve alle branch con update lunghi, REINFORCE/PPO; il singolo update DQN
+ * sta nei millisecondi e usa i contatori a 32 bit). Il risultato in microsecondi
+ * resta in uint32 (satura solo oltre ~71 minuti di misura). */
+uint32_t cycles64_to_us(uint64_t cycles){
+    return (uint32_t)(( cycles * 1000000ULL + (SystemCoreClock/2) ) / SystemCoreClock);
+}
