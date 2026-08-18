@@ -8,7 +8,7 @@ progetto F446 gia' presente sul branch `main` (versione REINFORCE).
 
 | | NUCLEO-H743ZI2 | NUCLEO-F446RE |
 |---|---|---|
-| Core | Cortex-M7 @ 480 MHz | Cortex-M4 @ 84 MHz |
+| Core | Cortex-M7 @ 480 MHz | Cortex-M4 @ 180 MHz |
 | FPU | doppia precisione | singola precisione (`fpv4-sp-d16`) |
 | RAM usata dal linker | `RAM_D1` 512 KB | `RAM` 128 KB |
 | Flash | 2 MB | 512 KB |
@@ -80,7 +80,7 @@ identico all'H7: nessuna dipendenza dalla famiglia.
 ha): nessuna modifica necessaria.
 
 `utils.c` (DWT) funziona invariato: il ciclo-contatore c'e' anche sul
-Cortex-M4. Cambia solo il tempo di wrap del CYCCNT a 32 bit, ~51 s a 84 MHz
+Cortex-M4. Cambia solo il tempo di wrap del CYCCNT a 32 bit, ~24 s a 180 MHz
 contro ~8.9 s a 480 MHz — gli accumulatori a 64 bit di `TrainTiming` restano
 comunque necessari.
 
@@ -88,9 +88,15 @@ comunque necessari.
 
 - **Rimosse** `SCB_EnableICache()` / `SCB_EnableDCache()` e tutta
   `MPU_Config()`: il Cortex-M4 non ha cache L1 ne' MPU da configurare qui.
-- **Clock**: HSI 16 MHz → PLL M=16, N=336, P=4 → **84 MHz** SYSCLK,
-  `FLASH_LATENCY_2`, `PWR_REGULATOR_VOLTAGE_SCALE3` (l'H7 usava LDO + VOS0 +
-  `FLASH_LATENCY_4` per 480 MHz).
+- **Clock**: HSI 16 MHz → PLL M=16, N=360, P=2 → **180 MHz** SYSCLK, il
+  massimo della F446. Richiede `PWR_REGULATOR_VOLTAGE_SCALE1` +
+  `HAL_PWREx_EnableOverDrive()` (obbligatorio sopra i 168 MHz, va chiamato a PLL
+  agganciata ma prima di commutare il SYSCLK) e `FLASH_LATENCY_5`
+  (150 < HCLK ≤ 180 MHz a VDD 3.3 V). I prescaler dei bus scendono a
+  APB1 = HCLK/4 = 45 MHz e APB2 = HCLK/2 = 90 MHz per restare nei limiti di
+  45/90 MHz. `PLLQ = 8` (45 MHz): con VCO = 360 MHz i 48 MHz esatti di USB/SDIO
+  non sono ottenibili, ma nessuna delle due periferiche e' usata.
+  (L'H7 usava LDO + VOS0 + `FLASH_LATENCY_4` per 480 MHz.)
 - **UART**: `USART3` → `USART2`. L'USART della serie F4 non ha FIFO ne'
   prescaler, quindi spariscono `ClockPrescaler`, `OneBitSampling` e le chiamate
   `HAL_UARTEx_Set{Tx,Rx}FifoThreshold` / `HAL_UARTEx_DisableFifoMode`.
