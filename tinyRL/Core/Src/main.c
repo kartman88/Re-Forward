@@ -326,8 +326,10 @@ void SystemClock_Config(void) {
 
   HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /* VOS1 richiesto per 480 MHz */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+  /* VOS0 richiesto per 480 MHz: VOS1 si ferma a 400 MHz. Sulla linea H74x la
+   * macro con SCALE0 scrive VOS1 in PWR->D3CR e in piu' alza l'overdrive
+   * (SYSCFG->PWRCR ODEN); passando SCALE1 l'overdrive verrebbe invece azzerato. */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   /* HSI 64 MHz → PLL1: DIVM=4 (16 MHz), DIVN=60 (960 MHz VCO), DIVP=2 → 480 MHz SYSCLK */

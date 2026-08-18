@@ -1495,23 +1495,25 @@ void SystemClock_Config(void) {
  8000d80:	2002      	movs	r0, #2
  8000d82:	f001 fc89 	bl	8002698 <HAL_PWREx_ConfigSupply>
 
-  /* VOS1 richiesto per 480 MHz */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
- 8000d86:	4b24      	ldr	r3, [pc, #144]	@ (8000e18 <SystemClock_Config+0xb0>)
+  /* VOS0 richiesto per 480 MHz: VOS1 si ferma a 400 MHz. Sulla linea H74x la
+   * macro con SCALE0 scrive VOS1 in PWR->D3CR e in piu' alza l'overdrive
+   * (SYSCFG->PWRCR ODEN); passando SCALE1 l'overdrive verrebbe invece azzerato. */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
+ 8000d86:	4a24      	ldr	r2, [pc, #144]	@ (8000e18 <SystemClock_Config+0xb0>)
  8000d88:	2100      	movs	r1, #0
- 8000d8a:	4a24      	ldr	r2, [pc, #144]	@ (8000e1c <SystemClock_Config+0xb4>)
+ 8000d8a:	4b24      	ldr	r3, [pc, #144]	@ (8000e1c <SystemClock_Config+0xb4>)
  8000d8c:	9101      	str	r1, [sp, #4]
- 8000d8e:	6ad9      	ldr	r1, [r3, #44]	@ 0x2c
- 8000d90:	f021 0101 	bic.w	r1, r1, #1
- 8000d94:	62d9      	str	r1, [r3, #44]	@ 0x2c
- 8000d96:	6adb      	ldr	r3, [r3, #44]	@ 0x2c
- 8000d98:	f003 0301 	and.w	r3, r3, #1
- 8000d9c:	9301      	str	r3, [sp, #4]
- 8000d9e:	6993      	ldr	r3, [r2, #24]
- 8000da0:	f443 4340 	orr.w	r3, r3, #49152	@ 0xc000
- 8000da4:	6193      	str	r3, [r2, #24]
- 8000da6:	6993      	ldr	r3, [r2, #24]
- 8000da8:	f403 4340 	and.w	r3, r3, #49152	@ 0xc000
+ 8000d8e:	6991      	ldr	r1, [r2, #24]
+ 8000d90:	f441 4140 	orr.w	r1, r1, #49152	@ 0xc000
+ 8000d94:	6191      	str	r1, [r2, #24]
+ 8000d96:	6991      	ldr	r1, [r2, #24]
+ 8000d98:	f401 4140 	and.w	r1, r1, #49152	@ 0xc000
+ 8000d9c:	9101      	str	r1, [sp, #4]
+ 8000d9e:	6ad9      	ldr	r1, [r3, #44]	@ 0x2c
+ 8000da0:	f041 0101 	orr.w	r1, r1, #1
+ 8000da4:	62d9      	str	r1, [r3, #44]	@ 0x2c
+ 8000da6:	6adb      	ldr	r3, [r3, #44]	@ 0x2c
+ 8000da8:	f003 0301 	and.w	r3, r3, #1
  8000dac:	9301      	str	r3, [sp, #4]
  8000dae:	9b01      	ldr	r3, [sp, #4]
   while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
@@ -1616,8 +1618,8 @@ void Error_Handler(void) {
 }
  8000e14:	b01f      	add	sp, #124	@ 0x7c
  8000e16:	bd30      	pop	{r4, r5, pc}
- 8000e18:	58000400 	.word	0x58000400
- 8000e1c:	58024800 	.word	0x58024800
+ 8000e18:	58024800 	.word	0x58024800
+ 8000e1c:	58000400 	.word	0x58000400
 
 08000e20 <main>:
 int main(void) {
