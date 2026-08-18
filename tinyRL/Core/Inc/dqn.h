@@ -23,7 +23,10 @@ typedef struct {
 #if TIME_LOG
 /* Profiling: cicli DWT misurati dentro dqn_train (una chiamata = un update).
  * total = intero update; forward = forward_q+forward_target sul batch;
- * backward = dqn_backward sul batch; adam = gradient_norm_q+adam_optimizer_q. */
+ * backward = dqn_backward sul batch; adam = gradient_norm_q+adam_optimizer_q.
+ * Contatori a 32 bit: il DWT wrappa ogni ~8.9 s a 480 MHz, mentre un singolo
+ * update DQN (batch di 32 transizioni) sta nell'ordine dei millisecondi, quindi
+ * un update non arriva mai a wrappare. */
 typedef struct {
     uint32_t total_cycles;
     uint32_t forward_cycles;

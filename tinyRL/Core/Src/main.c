@@ -26,6 +26,7 @@
 #include "rng.h"
 #include "utils.h"
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 
 /* USER CODE END Includes */
@@ -76,6 +77,20 @@ static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN 0 */
 #define MAX_STEPS_PER_EP  200
 
+/* Topologia della rete Q (e della sua copia target): OBS_DIM -> HIDDEN_DIM ->
+ * HIDDEN_DIM -> N_ACTIONS.
+ *
+ * Hidden 32 e non 64: e' il valore imposto dai 128 KB di SRAM della
+ * NUCLEO-F446RE (branch DQN_F446 e PPO_F446, dove hidden 64 + REPLAY_SIZE 1000
+ * chiederebbe ~141 KB di heap contro i ~117 disponibili). Sull'H7 la memoria
+ * non e' un vincolo, ma la rete resta la stessa perche' i tempi di update
+ * misurati qui vanno confrontati con quelli dell'F446 e fra algoritmi: il
+ * confronto ha senso solo a parita' di architettura di rete.
+ * Se serve tornare alla rete larga per i soli esperimenti di learning
+ * sull'H7, basta rimettere HIDDEN_DIM a 64 (i tempi non saranno piu'
+ * confrontabili con le branch F446). */
+#define HIDDEN_DIM  32
+
 static const float PENDULUM_TORQUES[N_ACTIONS] = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
 
 static float evaluate_reward_pendulum(const float *obs, uint32_t act) {
@@ -83,6 +98,20 @@ static float evaluate_reward_pendulum(const float *obs, uint32_t act) {
     float omega = obs[2];
     float u     = PENDULUM_TORQUES[act];
     return -(theta * theta + 0.1f * omega * omega + 0.001f * u * u);
+}
+
+/* Fine dell'update di training: la UART e' rimasta cieca per tutta la durata di
+ * dqn_train e nel frattempo il PC ha ritrasmesso l'osservazione, mandando la RX
+ * in overrun. Azzeriamo ORE e svuotiamo il registro di ricezione cosi' la
+ * lettura successiva riparte allineata su un frame nuovo (senza questo, i byte
+ * residui sfasano il frame successivo e uart_recv_floats lo scarta sul
+ * checksum, sprecando transizioni).
+ * Sull'USART della serie H7 lo svuotamento si chiede con RXFRQ; la FIFO qui e'
+ * disabilitata (HAL_UARTEx_DisableFifoMode), quindi la richiesta scarta il
+ * contenuto dell'RDR. */
+static void uart_rx_resync(UART_HandleTypeDef *huart) {
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_SEND_REQ(huart, UART_RXDATA_FLUSH_REQUEST);
 }
 
 #if TIME_LOG
@@ -165,11 +194,14 @@ int main(void) {
   TargetNetwork target;
   ReplayBuffer  replay;
 
-  int topology[]        = {OBS_DIM, 64, 64, N_ACTIONS};
+  int topology[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, N_ACTIONS};
   ActivationType acts[] = {ACT_RELU, ACT_RELU, ACT_NONE};
 
-  int init_ok = init_qnetwork(&online, 4, topology, acts) &&
-                init_target_network(&target, 4, topology) &&
+  int init_ok = init_qnetwork(&online, sizeof(topology) / sizeof(topology[0]),
+                             topology, acts) &&
+                init_target_network(&target,
+                                    sizeof(topology) / sizeof(topology[0]),
+                                    topology) &&
                 replay_buffer_init(&replay, REPLAY_SIZE, OBS_DIM);
 
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0,  GPIO_PIN_RESET);
@@ -178,8 +210,18 @@ int main(void) {
       copy_weights_to_target(&online, &target);
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = ready
   } else {
+      /* Heap esaurito: la topologia/replay richiesti non entrano nella RAM.
+       * Oltre a LD3 acceso lo diciamo anche sulla seriale, cosi' l'errore non
+       * e' muto per chi guarda solo il log del PC. */
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);  // LD3 = alloc fail
-      while (1);
+      char err[64];
+      int  n = snprintf(err, sizeof(err),
+                        "<<<ERR>>>ALLOC hidden=%d replay=%d\n",
+                        (int)HIDDEN_DIM, (int)REPLAY_SIZE);
+      while (1) {
+          HAL_UART_Transmit(&huart3, (uint8_t *)err, n, 1000);
+          HAL_Delay(500);
+      }
   }
 
   float    obs[OBS_DIM];
@@ -235,6 +277,9 @@ int main(void) {
         if (train_step % TARGET_UPDATE == 0)
             copy_weights_to_target(&online, &target);
         HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+        /* L'update dura millisecondi con la UART cieca: la RX e' quasi certamente
+         * in overrun, va risincronizzata prima di rispondere. */
+        uart_rx_resync(&huart3);
     }
 
     epsilon = calc_epsilon(step_total);
@@ -257,6 +302,7 @@ int main(void) {
         if (prof_count == PROF_N && prof_sent < PROF_DUMP_REPEAT) {
             prof_dump_csv(&huart3);
             prof_sent++;
+            uart_rx_resync(&huart3);   /* il dump e' lungo: RX di nuovo in overrun */
         }
 #endif
     } else {
