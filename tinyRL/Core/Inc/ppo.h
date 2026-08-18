@@ -14,7 +14,12 @@
 #define PPO_CLIP_EPS      0.2f
 #define PPO_EPOCHS        8
 #define PPO_BATCH_SIZE    64
-#define ROLLOUT_STEPS     2048
+/* Allineato al build NUCLEO-F446RE (branch PPO_F446): la' i 128 KB di SRAM
+ * impongono topologia 32-32 (vedi main.c) e rollout 512 invece dei 2048
+ * originali. Qui la RAM basterebbe, ma per confrontare i tempi di ppo_update
+ * fra H7 e F446 le due build devono girare sulla stessa architettura di rete e
+ * sullo stesso numero di step per update. */
+#define ROLLOUT_STEPS     512
 #define PPO_C1            0.5f
 #define PPO_C2            0.01f
 #define PPO_GRAD_CLIP     0.5f
@@ -30,7 +35,14 @@
 // never drops below PPO_SIGMA_MIN.
 #define PPO_SIGMA_INIT     1.5f
 #define PPO_SIGMA_MIN      0.1f
-#define PPO_SIGMA_N_STEPS  500000
+/* ppo_sigma_decay() viene chiamata una volta per ppo_update, cioe' ogni
+ * ROLLOUT_STEPS step di ambiente. Accorciando il rollout (2048 -> 512) gli
+ * update diventano 4x piu' frequenti: a parita' di PPO_SIGMA_N_STEPS sigma
+ * collasserebbe 4x prima in termini di step di ambiente. Il conteggio viene
+ * quindi riscalato sul rollout di riferimento originale, cosi' la traiettoria
+ * di sigma in funzione degli step di ambiente resta invariata. */
+#define PPO_SIGMA_REF_ROLLOUT  2048
+#define PPO_SIGMA_N_STEPS  (500000 * PPO_SIGMA_REF_ROLLOUT / ROLLOUT_STEPS)
 #define PPO_SIGMA_DECAY    (logf(PPO_SIGMA_INIT / PPO_SIGMA_MIN) / (float)PPO_SIGMA_N_STEPS)
 
 extern float g_ppo_log_sigma[N_ACT_DIMS];

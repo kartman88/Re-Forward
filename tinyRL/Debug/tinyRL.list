@@ -17,9 +17,9 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, ALLOC, LOAD, READONLY, DATA
   6 .data         00000070  24000000  080074f0  00009000  2**3
                   CONTENTS, ALLOC, LOAD, DATA
-  7 .bss          00002278  24000070  08007560  00009070  2**3
+  7 .bss          00000a78  24000070  08007560  00009070  2**3
                   ALLOC
-  8 ._user_heap_stack 00000600  240022e8  08007560  000092e8  2**0
+  8 ._user_heap_stack 00000600  24000ae8  08007560  00009ae8  2**0
                   ALLOC
   9 .ARM.attributes 0000002e  00000000  00000000  00009070  2**0
                   CONTENTS, READONLY
@@ -33,17 +33,17 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, READONLY, DEBUGGING, OCTETS
  14 .debug_rnglists 000015d8  00000000  00000000  000322a8  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 15 .debug_macro  00037049  00000000  00000000  00033880  2**0
+ 15 .debug_macro  00037055  00000000  00000000  00033880  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 16 .debug_line   00019851  00000000  00000000  0006a8c9  2**0
+ 16 .debug_line   00019851  00000000  00000000  0006a8d5  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 17 .debug_str    00157ecd  00000000  00000000  0008411a  2**0
+ 17 .debug_str    00157f1f  00000000  00000000  00084126  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 18 .comment      00000043  00000000  00000000  001dbfe7  2**0
+ 18 .comment      00000043  00000000  00000000  001dc045  2**0
                   CONTENTS, READONLY
- 19 .debug_frame  000029d4  00000000  00000000  001dc02c  2**2
+ 19 .debug_frame  000029d4  00000000  00000000  001dc088  2**2
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 20 .debug_line_str 00000058  00000000  00000000  001dea00  2**0
+ 20 .debug_line_str 00000058  00000000  00000000  001dea5c  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
 
 Disassembly of section .text:
@@ -1290,7 +1290,7 @@ static void on_train_end(void) {
  8000de8:	b02a      	add	sp, #168	@ 0xa8
  8000dea:	e8bd 81f0 	ldmia.w	sp!, {r4, r5, r6, r7, r8, pc}
  8000dee:	bf00      	nop
- 8000df0:	24002178 	.word	0x24002178
+ 8000df0:	24000978 	.word	0x24000978
  8000df4:	58021000 	.word	0x58021000
  8000df8:	10624dd3 	.word	0x10624dd3
  8000dfc:	240000bc 	.word	0x240000bc
@@ -1739,18 +1739,18 @@ __STATIC_FORCEINLINE void __DSB(void)
  80010c4:	e7fe      	b.n	80010c4 <main+0x200>
   dwt_init();
  80010c6:	f001 fcf5 	bl	8002ab4 <dwt_init>
-  int topology_critic[]        = {OBS_DIM, 64, 64, 1};
+  int topology_critic[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, 1};
  80010ca:	af19      	add	r7, sp, #100	@ 0x64
   rng_seed(HAL_GetTick());
  80010cc:	f001 fdd2 	bl	8002c74 <HAL_GetTick>
  80010d0:	4621      	mov	r1, r4
  80010d2:	f001 fa8d 	bl	80025f0 <rng_seed>
-  int topology_actor[]        = {OBS_DIM, 64, 64, PPO_ACTOR_OUT_DIM};
+  int topology_actor[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, PPO_ACTOR_OUT_DIM};
  80010d6:	4b1f      	ldr	r3, [pc, #124]	@ (8001154 <main+0x290>)
  80010d8:	f10d 0c54 	add.w	ip, sp, #84	@ 0x54
   ActivationType acts_actor[] = {ACT_TANH, ACT_TANH, ACT_NONE};
  80010dc:	6919      	ldr	r1, [r3, #16]
-  int topology_critic[]        = {OBS_DIM, 64, 64, 1};
+  int topology_critic[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, 1};
  80010de:	f103 0e14 	add.w	lr, r3, #20
   ActivationType acts_critic[] = {ACT_RELU, ACT_RELU, ACT_NONE};
  80010e2:	6a5a      	ldr	r2, [r3, #36]	@ 0x24
@@ -1764,10 +1764,10 @@ __STATIC_FORCEINLINE void __DSB(void)
  80010f0:	f88d 1012 	strb.w	r1, [sp, #18]
   ActivationType acts_critic[] = {ACT_RELU, ACT_RELU, ACT_NONE};
  80010f4:	f88d 2016 	strb.w	r2, [sp, #22]
-  int topology_actor[]        = {OBS_DIM, 64, 64, PPO_ACTOR_OUT_DIM};
+  int topology_actor[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, PPO_ACTOR_OUT_DIM};
  80010f8:	cb0f      	ldmia	r3, {r0, r1, r2, r3}
  80010fa:	e88c 000f 	stmia.w	ip, {r0, r1, r2, r3}
-  int topology_critic[]        = {OBS_DIM, 64, 64, 1};
+  int topology_critic[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, 1};
  80010fe:	e89e 000f 	ldmia.w	lr, {r0, r1, r2, r3}
  8001102:	e887 000f 	stmia.w	r7, {r0, r1, r2, r3}
   int init_ok = network_init(&actor,  4, topology_actor,  acts_actor)  &&
@@ -3560,7 +3560,7 @@ void actor_sample_action(Network *actor, float *obs, float *action_out,
 }
  8001edc:	ecbd 8b08 	vpop	{d8-d11}
  8001ee0:	e8bd 87f0 	ldmia.w	sp!, {r4, r5, r6, r7, r8, r9, sl, pc}
- 8001ee4:	24002168 	.word	0x24002168
+ 8001ee4:	24000968 	.word	0x24000968
  8001ee8:	00000000 	.word	0x00000000
  8001eec:	3feb3f8e 	.word	0x3feb3f8e
  8001ef0:	3f800008 	.word	0x3f800008
@@ -3966,13 +3966,13 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
  80021da:	ece0 7a01 	vstmia	r0!, {s15}
                     for (int j = 0; j < lc->in_dim; j++)
  80021de:	e7e9      	b.n	80021b4 <ppo_update+0x2c0>
- 80021e0:	24002178 	.word	0x24002178
+ 80021e0:	24000978 	.word	0x24000978
  80021e4:	24000168 	.word	0x24000168
  80021e8:	3e4ccccd 	.word	0x3e4ccccd
  80021ec:	3a03126f 	.word	0x3a03126f
  80021f0:	3a83126f 	.word	0x3a83126f
  80021f4:	24000164 	.word	0x24000164
- 80021f8:	24002168 	.word	0x24002168
+ 80021f8:	24000968 	.word	0x24000968
  80021fc:	f8dd 8018 	ldr.w	r8, [sp, #24]
             for (int l = 0; l < (int)critic->num_layers; l++) {
  8002200:	3230      	adds	r2, #48	@ 0x30
@@ -4145,10 +4145,10 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
  8002358:	ed9f 7a05 	vldr	s14, [pc, #20]	@ 8002370 <ppo_update+0x47c>
  800235c:	e7c1      	b.n	80022e2 <ppo_update+0x3ee>
  800235e:	bf00      	nop
- 8002360:	24002168 	.word	0x24002168
- 8002364:	c0135d77 	.word	0xc0135d77
- 8002368:	36b5bbf3 	.word	0x36b5bbf3
- 800236c:	24002178 	.word	0x24002178
+ 8002360:	24000968 	.word	0x24000968
+ 8002364:	c0135d88 	.word	0xc0135d88
+ 8002368:	35b5bbf3 	.word	0x35b5bbf3
+ 800236c:	24000978 	.word	0x24000978
  8002370:	c0135d8e 	.word	0xc0135d8e
 
 08002374 <ppo_agent_init>:
@@ -4217,7 +4217,7 @@ int ppo_agent_init(PPOAgent *agent, Network *actor, Network *critic,
 
     if (!rollout_buffer_init(&agent->buf, ROLLOUT_STEPS, OBS_DIM))
  80023b4:	220b      	movs	r2, #11
- 80023b6:	f44f 6100 	mov.w	r1, #2048	@ 0x800
+ 80023b6:	f44f 7100 	mov.w	r1, #512	@ 0x200
  80023ba:	f104 0008 	add.w	r0, r4, #8
     memset(agent->prev_action, 0, sizeof(agent->prev_action));
  80023be:	6725      	str	r5, [r4, #112]	@ 0x70
@@ -4242,7 +4242,7 @@ int ppo_agent_init(PPOAgent *agent, Network *actor, Network *critic,
  80023d4:	609a      	str	r2, [r3, #8]
 }
  80023d6:	bd70      	pop	{r4, r5, r6, pc}
- 80023d8:	24002168 	.word	0x24002168
+ 80023d8:	24000968 	.word	0x24000968
  80023dc:	3ecf991f 	.word	0x3ecf991f
 
 080023e0 <ppo_step>:
@@ -4397,7 +4397,7 @@ void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
 
     // 7. Trigger training when rollout is full
     if (agent->rollout_step_count >= ROLLOUT_STEPS) {
- 80024c6:	f5b2 6f00 	cmp.w	r2, #2048	@ 0x800
+ 80024c6:	f5b2 7f00 	cmp.w	r2, #512	@ 0x200
     agent->rollout_step_count++;
  80024ca:	63a2      	str	r2, [r4, #56]	@ 0x38
     if (agent->rollout_step_count >= ROLLOUT_STEPS) {
@@ -5044,10 +5044,10 @@ void SysTick_Handler(void)
 }
  80028bc:	bd10      	pop	{r4, pc}
  80028be:	bf00      	nop
- 80028c0:	24002198 	.word	0x24002198
+ 80028c0:	24000998 	.word	0x24000998
  80028c4:	24080000 	.word	0x24080000
  80028c8:	00000400 	.word	0x00000400
- 80028cc:	240022e8 	.word	0x240022e8
+ 80028cc:	24000ae8 	.word	0x24000ae8
 
 080028d0 <SystemInit>:
  __IO uint32_t tmpreg;
@@ -5615,7 +5615,7 @@ LoopFillZerobss:
   ldr r2, =_sbss
  8002ba4:	24000070 	.word	0x24000070
   ldr r4, =_ebss
- 8002ba8:	240022e8 	.word	0x240022e8
+ 8002ba8:	24000ae8 	.word	0x24000ae8
 
 08002bac <ADC3_IRQHandler>:
  * @retval None
@@ -5756,7 +5756,7 @@ __weak void HAL_IncTick(void)
 }
  8002c68:	4770      	bx	lr
  8002c6a:	bf00      	nop
- 8002c6c:	2400219c 	.word	0x2400219c
+ 8002c6c:	2400099c 	.word	0x2400099c
  8002c70:	24000018 	.word	0x24000018
 
 08002c74 <HAL_GetTick>:
@@ -5771,7 +5771,7 @@ __weak uint32_t HAL_GetTick(void)
 }
  8002c78:	4770      	bx	lr
  8002c7a:	bf00      	nop
- 8002c7c:	2400219c 	.word	0x2400219c
+ 8002c7c:	2400099c 	.word	0x2400099c
 
 08002c80 <HAL_GetREVID>:
   * @brief  Returns the device revision identifier.
@@ -12451,7 +12451,7 @@ __STATIC_FORCEINLINE uint32_t __STREXW(uint32_t value, volatile uint32_t *addr)
  8005d06:	d1f2      	bne.n	8005cee <sbrk_aligned+0x22>
  8005d08:	e7ef      	b.n	8005cea <sbrk_aligned+0x1e>
  8005d0a:	bf00      	nop
- 8005d0c:	240021a0 	.word	0x240021a0
+ 8005d0c:	240009a0 	.word	0x240009a0
 
 08005d10 <_malloc_r>:
  8005d10:	e92d 43f8 	stmdb	sp!, {r3, r4, r5, r6, r7, r8, r9, lr}
@@ -12561,19 +12561,19 @@ __STATIC_FORCEINLINE uint32_t __STREXW(uint32_t value, volatile uint32_t *addr)
  8005e06:	6005      	str	r5, [r0, #0]
  8005e08:	e7d6      	b.n	8005db8 <_malloc_r+0xa8>
  8005e0a:	bf00      	nop
- 8005e0c:	240021a4 	.word	0x240021a4
+ 8005e0c:	240009a4 	.word	0x240009a4
 
 08005e10 <__malloc_lock>:
  8005e10:	4801      	ldr	r0, [pc, #4]	@ (8005e18 <__malloc_lock+0x8>)
  8005e12:	f000 b881 	b.w	8005f18 <__retarget_lock_acquire_recursive>
  8005e16:	bf00      	nop
- 8005e18:	240022e4 	.word	0x240022e4
+ 8005e18:	24000ae4 	.word	0x24000ae4
 
 08005e1c <__malloc_unlock>:
  8005e1c:	4801      	ldr	r0, [pc, #4]	@ (8005e24 <__malloc_unlock+0x8>)
  8005e1e:	f000 b87c 	b.w	8005f1a <__retarget_lock_release_recursive>
  8005e22:	bf00      	nop
- 8005e24:	240022e4 	.word	0x240022e4
+ 8005e24:	24000ae4 	.word	0x24000ae4
 
 08005e28 <sniprintf>:
  8005e28:	b40c      	push	{r2, r3}
@@ -12644,7 +12644,7 @@ __STATIC_FORCEINLINE uint32_t __STREXW(uint32_t value, volatile uint32_t *addr)
  8005eba:	b103      	cbz	r3, 8005ebe <_sbrk_r+0x1a>
  8005ebc:	6023      	str	r3, [r4, #0]
  8005ebe:	bd38      	pop	{r3, r4, r5, pc}
- 8005ec0:	240022e0 	.word	0x240022e0
+ 8005ec0:	24000ae0 	.word	0x24000ae0
 
 08005ec4 <__errno>:
  8005ec4:	4b01      	ldr	r3, [pc, #4]	@ (8005ecc <__errno+0x8>)
@@ -12772,7 +12772,7 @@ __STATIC_FORCEINLINE uint32_t __STREXW(uint32_t value, volatile uint32_t *addr)
  8005fc2:	e7ca      	b.n	8005f5a <_free_r+0x22>
  8005fc4:	bd38      	pop	{r3, r4, r5, pc}
  8005fc6:	bf00      	nop
- 8005fc8:	240021a4 	.word	0x240021a4
+ 8005fc8:	240009a4 	.word	0x240009a4
 
 08005fcc <__ssputs_r>:
  8005fcc:	e92d 47f0 	stmdb	sp!, {r4, r5, r6, r7, r8, r9, sl, lr}

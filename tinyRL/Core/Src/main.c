@@ -66,6 +66,14 @@ static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN 0 */
 #define MAX_STEPS_PER_EP  1000
 
+/* Topologia delle reti. Allineata al build NUCLEO-F446RE (branch PPO_F446):
+ * la' le due reti a 64 unita' occuperebbero da sole ~163 KB fra pesi,
+ * gradienti e momenti Adam, oltre i 128 KB di SRAM totali, quindi l'hidden
+ * scende a 32. Qui l'H7 avrebbe RAM a sufficienza per 64, ma i tempi di
+ * ppo_update sono confrontabili fra le due schede solo a parita' di rete.
+ * Vedi il commento su ROLLOUT_STEPS in ppo.h. */
+#define HIDDEN_DIM  32
+
 #if !USE_CONTINUOUS_ACTION
 static const float PENDULUM_TORQUES[N_ACTIONS] = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
 
@@ -193,14 +201,14 @@ int main(void) {
   PPOAgent agent;
 
 #if USE_CONTINUOUS_ACTION
-  int topology_actor[]        = {OBS_DIM, 64, 64, PPO_ACTOR_OUT_DIM};
+  int topology_actor[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, PPO_ACTOR_OUT_DIM};
   ActivationType acts_actor[] = {ACT_TANH, ACT_TANH, ACT_NONE};
 #else
-  int topology_actor[]        = {OBS_DIM, 64, 64, PPO_ACTOR_OUT_DIM};
+  int topology_actor[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, PPO_ACTOR_OUT_DIM};
   ActivationType acts_actor[] = {ACT_RELU, ACT_RELU, ACT_SOFTMAX};
 #endif
 
-  int topology_critic[]        = {OBS_DIM, 64, 64, 1};
+  int topology_critic[]        = {OBS_DIM, HIDDEN_DIM, HIDDEN_DIM, 1};
   ActivationType acts_critic[] = {ACT_RELU, ACT_RELU, ACT_NONE};
 
   int init_ok = network_init(&actor,  4, topology_actor,  acts_actor)  &&
