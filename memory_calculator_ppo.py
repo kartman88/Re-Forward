@@ -162,7 +162,7 @@ def trainable_params(topology):
 
 # Limiti di RAM (KB) delle schede ST usate negli esperimenti.
 BOARDS = [
-    ("STM32F406 - 128 KB", 128),
+    ("STM32F446 - 128 KB", 128),
     ("STM32H7 - 1 MB",     1024),
     ("STM32N6 - 4 MB",     4096),
 ]
@@ -212,6 +212,10 @@ PLOT_FONT      = ["Times New Roman", "Liberation Serif", "Nimbus Roman", "DejaVu
 PLOT_FONT_SIZE = 20                    # testo grande (verra' rimpicciolito nel paper)
 # formati di salvataggio: vettoriale (PDF/SVG) + anteprima raster (PNG)
 PLOT_SAVE_FORMATS = ["pdf", "svg", "png"]
+# Cartella di destinazione dei grafici: i nomi file senza percorso finiscono
+# qui, accanto allo script, invece di sporcare la root del repo.
+PLOT_OUT_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "memory_plots")
 
 # Palette minimalista: una tinta per curva (viola / verde-acqua).
 COLOR_MINE     = "#1B9E77"             # verde acqua - approccio on-device
@@ -225,6 +229,19 @@ GRID_MAJOR      = dict(lw=0.6, alpha=0.45, color="0.6")
 GRID_MINOR      = dict(lw=0.3, alpha=0.30, color="0.75")
 TITLE_PAD       = 54                   # spazio titolo-grafico (lascia posto alla legenda)
 SHOW_TITLE      = True
+# Asse Y logaritmico: i limiti delle schede coprono due decadi (128 KB -> 4 MB),
+# in scala lineare la N6 schiaccia le curve sul fondo e il grafico e' illeggibile.
+PLOT_YLOG       = True
+# Asse X logaritmico: serve quando il range di hidden arriva a coprire anche gli
+# incroci con H7 (1 MB) e N6 (4 MB), migliaia di unita' piu' in la' di quelli
+# della F446. In lineare i due incroci a h=89/181 finirebbero appiccicati a zero.
+PLOT_XLOG       = True
+# Tetto dell'asse Y in KB (solo in scala lineare): serve a "ridurre la scala" e
+# zoomare sulle curve invece di lasciare che il limite N6 da 4 MB le schiacci sul
+# fondo. I limiti scheda sopra il tetto non vengono disegnati. None = automatico.
+PLOT_YMAX_KB    = None
+Y_PAD_BOTTOM    = 0.7                  # margine sotto la curva piu' bassa (fattore)
+Y_PAD_TOP       = 1.7                  # margine sopra il limite piu' alto (fattore)
 
 
 def run_plot(args):
@@ -233,7 +250,8 @@ def run_plot(args):
     if args.out:
         matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import AutoMinorLocator
+    from matplotlib.ticker import (AutoMinorLocator, FuncFormatter, LogLocator,
+                                   NullLocator)
 
     families = PLOT_FONT if isinstance(PLOT_FONT, (list, tuple)) else [PLOT_FONT]
     plt.rcParams.update({
@@ -247,7 +265,13 @@ def run_plot(args):
         "svg.fonttype": "none",        # mantieni il testo editabile in SVG
     })
 
-    hiddens = np.unique(np.linspace(args.hmin, args.hmax, args.points).astype(int))
+    # Campionamento uniforme in scala log quando l'asse X e' logaritmico, cosi'
+    # la risoluzione resta buona anche nella prima decade (dove stanno gli
+    # incroci con la F446).
+    if PLOT_XLOG:
+        hiddens = np.unique(np.geomspace(args.hmin, args.hmax, args.points).astype(int))
+    else:
+        hiddens = np.unique(np.linspace(args.hmin, args.hmax, args.points).astype(int))
     mine_kb, classic_kb = [], []
     for h in hiddens:
         mine, classic = memory_totals(int(h), args.obs, args.act,
@@ -256,6 +280,15 @@ def run_plot(args):
         classic_kb.append(classic / 1024.0)
 
     fig, ax = plt.subplots(figsize=PLOT_FIGSIZE, dpi=PLOT_DPI)
+
+    # Estremi dell'asse Y: servono gia' qui perche' le verticali degli incroci
+    # partono dal fondo del grafico (in scala log lo zero non esiste).
+    max_board_kb = max(limit for _, limit in BOARDS)
+    if PLOT_YLOG:
+        y_bottom = min(mine_kb) * Y_PAD_BOTTOM
+        y_top    = max(max(classic_kb), max_board_kb) * Y_PAD_TOP
+    else:
+        y_bottom, y_top = 0.0, PLOT_YMAX_KB
 
     # curve principali in primo piano (z-order alto)
     ax.plot(hiddens, classic_kb, color=COLOR_CLASSIC, lw=PLOT_LINE_WIDTH,
@@ -267,6 +300,8 @@ def run_plot(args):
 
     # linee-limite delle schede: grigio neutro, sullo sfondo (z-order basso)
     for (name, limit_kb), c in zip(BOARDS, BOARD_COLORS):
+        if y_top is not None and limit_kb > y_top:
+            continue                      # limite fuori dal tetto dell'asse Y
         ax.axhline(limit_kb, linestyle="--", color=c, linewidth=1.2, zorder=2)
         ax.text(args.hmax, limit_kb, f" {name}", va="center", ha="left",
                 fontsize=PLOT_FONT_SIZE * 0.55, color=c)
@@ -279,24 +314,51 @@ def run_plot(args):
     for ys, curve_color in [(np.array(mine_kb), COLOR_MINE),
                             (np.array(classic_kb), COLOR_CLASSIC)]:
         for (_, limit_kb), c in zip(BOARDS, BOARD_COLORS):
+            if y_top is not None and limit_kb > y_top:
+                continue                  # incrocio fuori dal tetto dell'asse Y
             if ys[0] <= limit_kb <= ys[-1]:
                 x_cross = float(np.interp(limit_kb, ys, hiddens))
                 ax.plot([x_cross], [limit_kb], "o", color=curve_color,
                         markersize=MARKER_SIZE, zorder=7)
-                ax.vlines(x_cross, 0, limit_kb, color=curve_color,
+                ax.vlines(x_cross, y_bottom, limit_kb, color=curve_color,
                           linestyle=":", linewidth=1.3, alpha=0.8, zorder=5)
                 crossings.append((x_cross, curve_color))
+
+    hop = getattr(args, "hop", None)
+    if hop:
+        ax.axvline(hop, color="0.35", linestyle="-.", linewidth=1.0,
+                   alpha=0.7, zorder=3)
+        ax.text(hop, y_bottom, f" config attuale (h={hop}) ", rotation=90,
+                va="bottom", ha="left", zorder=8, color="0.35",
+                fontsize=PLOT_FONT_SIZE * 0.5)
 
     ax.set_xlabel("Dimensione hidden layer (unita')")
     ax.set_ylabel("Consumo memoria (KB)")
     ax.set_xlim(args.hmin, args.hmax)
-    ax.set_ylim(bottom=0)
+    if PLOT_XLOG:
+        ax.set_xscale("log")
+    if PLOT_YLOG:
+        ax.set_yscale("log")
+        ax.set_ylim(y_bottom, y_top)
+    else:
+        ax.set_ylim(0, y_top)
 
     # griglia maggiore + minore, sottile e trasparente, dietro ai dati.
     # Solo l'asse Y usa i minor tick automatici: sull'asse X i tick sono
     # personalizzati (segnano gli incroci) e una spaziatura irregolare manderebbe
     # in tilt AutoMinorLocator.
-    ax.yaxis.set_minor_locator(AutoMinorLocator())
+    if PLOT_YLOG:
+        # 1-2-5 per decade come tick maggiori (etichettati in numeri interi, non
+        # in potenze di 10), i restanti multipli come minori senza etichetta.
+        ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0, 2.0, 5.0),
+                                              numticks=20))
+        ax.yaxis.set_minor_locator(LogLocator(base=10.0,
+                                              subs=(3.0, 4.0, 6.0, 7.0, 8.0, 9.0),
+                                              numticks=20))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+        ax.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
+    else:
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
     ax.grid(which="major", **GRID_MAJOR)
     ax.grid(which="minor", axis="y", **GRID_MINOR)
     ax.set_axisbelow(True)
@@ -317,14 +379,31 @@ def run_plot(args):
     # Valori di H degli incroci come tick sull'asse X. I tick automatici troppo
     # vicini vengono rimossi per fare spazio senza sovrapporre le etichette.
     cross_ticks = {int(round(xc)): color for xc, color in crossings}
-    thr = (args.hmax - args.hmin) * 0.035
+    if PLOT_XLOG:
+        # In log la distanza va misurata in decadi: 0.08 ~ 20% di scarto in x.
+        ax.xaxis.set_minor_locator(NullLocator())   # niente tick minori di decade
+        far  = lambda t, xc: abs(np.log10(t) - np.log10(xc)) > 0.11
+        near = lambda a, b: abs(np.log10(a) - np.log10(b)) < 0.19
+    else:
+        thr = (args.hmax - args.hmin) * 0.05
+        far  = lambda t, xc: abs(t - xc) > thr
+        near = lambda a, b: abs(a - b) < thr * 1.4
     auto_ticks = [t for t in ax.get_xticks()
                   if args.hmin <= t <= args.hmax
-                  and all(abs(t - xc) > thr for xc in cross_ticks)]
+                  and all(far(t, xc) for xc in cross_ticks)]
     ax.set_xticks(sorted(set(auto_ticks) | set(cross_ticks)))
     ax.set_xticklabels([str(int(t)) for t in ax.get_xticks()])
+    # Etichette troppo vicine fra loro (due incroci ravvicinati) vengono
+    # sfalsate su una seconda riga invece di sovrapporsi.
+    prev_val, prev_row = None, 0
     for lbl in ax.get_xticklabels():
         val = int(lbl.get_text())
+        if prev_val is not None and near(val, prev_val) and prev_row == 0:
+            lbl.set_y(-0.045)
+            prev_row = 1
+        else:
+            prev_row = 0
+        prev_val = val
         if val in cross_ticks:
             lbl.set_color(cross_ticks[val])
             lbl.set_fontweight("bold")
@@ -333,6 +412,9 @@ def run_plot(args):
 
     if args.out:
         base = os.path.splitext(args.out)[0]
+        if not os.path.isabs(base):          # relativo -> cartella dei grafici
+            base = os.path.join(PLOT_OUT_DIR, base)
+        os.makedirs(os.path.dirname(base), exist_ok=True)
         for fmt in PLOT_SAVE_FORMATS:
             out = f"{base}.{fmt}"
             fig.savefig(out, format=fmt, bbox_inches="tight", dpi=PLOT_DPI)
@@ -347,13 +429,13 @@ def run_interactive():
     print("=" * (LABEL_W + BYTES_W + KB_W))
     print("Invio vuoto = valore di default.\n")
 
-    actor_topo  = ask_topology("Topologia ACTOR (policy)",  [11, 64, 64, 3])
-    critic_topo = ask_topology("Topologia CRITIC (value)",  [11, 64, 64, 1])
+    actor_topo  = ask_topology("Topologia ACTOR (policy)",  [11, 32, 3])
+    critic_topo = ask_topology("Topologia CRITIC (value)",  [11, 32, 1])
 
     obs_dim     = actor_topo[0]
     n_act_dims  = actor_topo[-1]
 
-    T = ask_int("Rollout buffer size (N step)", 2048)
+    T = ask_int("Rollout buffer size (N step)", 512)
     batch_size = ask_int("Batch size minibatch PPO", 64)
     ask_int("n_epochs PPO (non incide su RAM)", 8)
 
@@ -437,18 +519,19 @@ def main():
     cfg = argparse.Namespace()
     cfg.obs     = ask_int("obs_dim", 11)
     cfg.act     = ask_int("n_act_dims", 3)
-    cfg.depth   = ask_int("Profondita' rete (n. hidden layer)", 2)
-    cfg.rollout = ask_int("Rollout buffer T", 2048)
+    cfg.depth   = ask_int("Profondita' rete (n. hidden layer)", 1)
+    cfg.rollout = ask_int("Rollout buffer T", 512)
     cfg.batch   = ask_int("Batch size minibatch PPO", 64)
     cfg.hmin    = ask_int("Hidden layer minimo (asse X)", 16)
-    cfg.hmax    = ask_int("Hidden layer massimo (asse X)", 8192)
-    cfg.points  = ask_int("Punti campionati sull'asse X", 200)
+    cfg.hmax    = ask_int("Hidden layer massimo (asse X)", 12000)
+    cfg.points  = ask_int("Punti campionati sull'asse X", 400)
 
     save = input("Output: [1] salva PNG  [2] mostra a schermo [1]: ").strip()
     if save == "2":
         cfg.out = ""
     else:
-        cfg.out = ask_str("Nome file PNG", "memory_comparison.png")
+        print(f"(i nomi senza percorso vengono salvati in {PLOT_OUT_DIR}/)")
+        cfg.out = ask_str("Nome file grafico", "memory_comparison.png")
 
     run_plot(cfg)
 
