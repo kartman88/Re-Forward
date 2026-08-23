@@ -1,8 +1,6 @@
-../Core/Src/dqn.c:9:5:replay_buffer_init	5
-../Core/Src/dqn.c:34:6:replay_buffer_push	2
-../Core/Src/dqn.c:47:5:uart_recv_floats	9
-../Core/Src/dqn.c:79:5:uart_send_float_action	1
-../Core/Src/dqn.c:89:5:uart_send_action_discrete	1
-../Core/Src/dqn.c:95:7:calc_epsilon	2
-../Core/Src/dqn.c:101:10:dqn_select_action	9
-../Core/Src/dqn.c:115:6:dqn_train	9
+../Core/Src/dqn.c:25:5:replay_buffer_init	4
+../Core/Src/dqn.c:53:6:replay_buffer_free	3
+../Core/Src/dqn.c:63:6:replay_buffer_push	5
+../Core/Src/dqn.c:85:7:calc_epsilon	2
+../Core/Src/dqn.c:91:10:dqn_select_action	5
+../Core/Src/dqn.c:109:6:dqn_train	6

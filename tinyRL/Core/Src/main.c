@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "neural_net.h"
 #include "dqn.h"
+#include "uart.h"
 #include "rng.h"
 #include "utils.h"
 #include <stdio.h>
@@ -113,6 +114,75 @@ static void uart_rx_resync(UART_HandleTypeDef *huart) {
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_SEND_REQ(huart, UART_RXDATA_FLUSH_REQUEST);
 }
+
+#if BENCH_KERNELS
+/* Micro-benchmark eseguito una volta all'avvio, prima del loop di training.
+ * Attribuisce il costo del forward alle sue componenti: dice quanto del tempo
+ * di forward per update stia nelle funzioni trascendenti (che newlib implementa
+ * in software) e quanto invece nel prodotto matrice-vettore. E' il numero da
+ * guardare prima di decidere se valga la pena approssimare tanh o cambiare
+ * attivazione — qui gli hidden sono ReLU, quindi ci si aspetta che il forward
+ * sia quasi tutto MAC.
+ *
+ * Emette righe "<<<BENCH>>>nome,cicli_per_chiamata". Il costo include
+ * l'overhead di loop: la riga "loop" e' la baseline da sottrarre. Il `volatile
+ * sink` impedisce a -Ofast di eliminare tutto come codice morto. */
+static void bench_emit(const char *name, uint32_t cycles, uint32_t n) {
+  char line[96];
+  int k = snprintf(line, sizeof(line), "<<<BENCH>>>%s,%lu\n",
+                   name, (unsigned long)(cycles / n));
+  HAL_UART_Transmit(&huart3, (uint8_t *)line, k, 1000);
+}
+
+static void bench_kernels(QNetwork *online, TargetNetwork *target) {
+  enum { NB = 4096 };
+  volatile float sink = 0.f;
+  float in[16], obs[OBS_DIM];
+  uint32_t t0;
+
+  for (int i = 0; i < 16; i++)
+    in[i] = -4.0f + 0.5f * (float)i;          /* pre-attivazioni tipiche */
+  for (int i = 0; i < OBS_DIM; i++)
+    obs[i] = 0.1f * (float)i;
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += in[i & 15];
+  bench_emit("loop", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += tanhf(in[i & 15]);
+  bench_emit("tanhf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += expf(in[i & 15]);
+  bench_emit("expf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += logf(fabsf(in[i & 15]) + 0.1f);
+  bench_emit("logf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += sqrtf(fabsf(in[i & 15]) + 0.1f);
+  bench_emit("sqrtf", dwt_delta(t0, dwt_ticks()), NB);
+
+  /* Le due reti hanno la stessa topologia: la differenza fra i due tempi e'
+   * solo il ramo di attivazione, non la dimensione. */
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) forward_q(online, obs, NULL);
+  bench_emit("online_fwd", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) forward_target(target, obs, NULL);
+  bench_emit("target_fwd", dwt_delta(t0, dwt_ticks()), NB);
+
+  (void)sink;
+
+  /* Il benchmark dura qualche decimo di secondo, durante i quali il PC sta
+   * gia' trasmettendo e la RX va in overrun: stesso ripristino che serve dopo
+   * un update. Senza, il flag ORE resta alto e la prima ricezione non riparte. */
+  uart_rx_resync(&huart3);
+}
+#endif /* BENCH_KERNELS */
 
 #if TIME_LOG
 /* Dump del buffer di profiling come CSV ASCII, racchiuso tra i marcatori che
@@ -209,6 +279,9 @@ int main(void) {
   if (init_ok) {
       copy_weights_to_target(&online, &target);
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = ready
+#if BENCH_KERNELS
+      bench_kernels(&online, &target);
+#endif
   } else {
       /* Heap esaurito: la topologia/replay richiesti non entrano nella RAM.
        * Oltre a LD3 acceso lo diciamo anche sulla seriale, cosi' l'errore non
@@ -288,7 +361,8 @@ int main(void) {
     memcpy(prev_obs, obs, OBS_DIM * sizeof(float));
     first_step = 0;
 
-    uart_send_float_action(&huart3, PENDULUM_TORQUES[action], manual_done, 100);
+    /* Caso scalare della uart_send_action unificata: un solo float. */
+    uart_send_action(&huart3, &PENDULUM_TORQUES[action], 1, manual_done, 100);
 
     if (manual_done) {
         memset(prev_obs, 0, sizeof(prev_obs));

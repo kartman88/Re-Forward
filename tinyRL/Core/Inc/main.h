@@ -75,9 +75,20 @@ void Error_Handler(void);
 #define LD2_GPIO_Port GPIOE
 
 /* USER CODE BEGIN Private defines */
+
 /* Profiling dei tempi di esecuzione di dqn_train: 1 = attivo, 0 = disattivo.
  * Deve corrispondere al TIME_LOG di hil_trainer_log.py lato PC. */
 #define TIME_LOG 1
+
+/* Micro-benchmark dei kernel all'avvio (tanhf/expf/logf/sqrtf e i forward
+ * completi di rete online e rete target), per attribuire il costo del forward
+ * prima di decidere dove intervenire. Emette righe "<<<BENCH>>>" su UART prima
+ * del loop di training. Il trainer lato PC le tollera senza modifiche (cerca
+ * "<<<PROF_BEGIN>>>" per il dump dei tempi e 0x02 per i frame azione, e il
+ * testo ASCII non contiene ne' l'uno ne' l'altro), quindi si puo' attivare
+ * anche durante una sessione normale: serve una run sola per avere i numeri. */
+#define BENCH_KERNELS 0
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

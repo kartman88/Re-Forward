@@ -30,8 +30,8 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_uart_ex.h \
  ../Core/Inc/neural_net.h ../Core/Inc/dense_layer.h ../Core/Inc/main.h \
- ../Core/Inc/dqn.h ../Core/Inc/neural_net.h ../Core/Inc/rng.h \
- ../Core/Inc/utils.h
+ ../Core/Inc/dqn.h ../Core/Inc/neural_net.h ../Core/Inc/uart.h \
+ ../Core/Inc/rng.h ../Core/Inc/utils.h
 ../Core/Inc/main.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -68,5 +68,6 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Core/Inc/main.h:
 ../Core/Inc/dqn.h:
 ../Core/Inc/neural_net.h:
+../Core/Inc/uart.h:
 ../Core/Inc/rng.h:
 ../Core/Inc/utils.h:

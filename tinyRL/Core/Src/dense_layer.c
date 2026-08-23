@@ -1,102 +1,64 @@
-//#include "backprop.h"
-#include "stm32h7xx_hal.h"
-#include "main.h"
 #include "dense_layer.h"
 #include "rng.h"
 
 #include <math.h>
-#include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static inline float frand(void) { return rng_uniform(); }
+void init_layer_params(DenseLayer *layer) {
+    const int in_dim  = layer->in_dim;
+    const int out_dim = layer->out_dim;
+    const int n_w     = out_dim * in_dim;
 
-int free_2d(float ***matrix, int rows) {
-    if (matrix == NULL || *matrix == NULL || rows <= 0)
-        return 0;
+    // Limite di Xavier (Glorot): sqrt(6 / (in_dim + out_dim)).
+    // Mantiene stabile la varianza del segnale attraverso i layer.
+    const float limit = sqrtf(6.0f / (float)(in_dim + out_dim));
 
-    for (int i = 0; i < rows; ++i) {
-        if ((*matrix)[i] != NULL) {
-            free((*matrix)[i]);
-            (*matrix)[i] = NULL;
-        }
-    }
+    // rng_uniform() -> [0,1);  (u - 0.5) * 2 * limit -> [-limit, +limit)
+    for (int k = 0; k < n_w; ++k)
+        layer->W[k] = (rng_uniform() - 0.5f) * 2.0f * limit;
 
-    free(*matrix);
-    *matrix = NULL;
-    return 1;
+    // Gradienti e momenti Adam a zero: dW, mW, vW sono contigui subito dopo W.
+    memset(layer->dW, 0, 3 * (size_t)n_w * sizeof(float));
+
+    // Bias a zero, insieme ai loro gradienti/momenti (b, db, mb, vb contigui).
+    memset(layer->b, 0, 4 * (size_t)out_dim * sizeof(float));
 }
 
-int alloc_2d(float ***matrix, int rows, int cols){
-    if (rows <= 0 || cols <= 0 || matrix == NULL) return 0;
+int dense_init(DenseLayer *layer, int in_dim, int out_dim,
+               ActivationType activation) {
+    if (in_dim <= 0 || out_dim <= 0) return 0;
 
-    *matrix = malloc(rows * sizeof(float *));
-    if (*matrix == NULL) return 0;
-
-    for (int i = 0; i < rows; ++i) {
-        (*matrix)[i] = calloc(cols, sizeof(float));
-        if ((*matrix)[i] == NULL) {
-            //deallocate
-            for (int j = 0; j < i; ++j)
-                free((*matrix)[j]);
-            free(*matrix);
-            *matrix = NULL;
-            return 0;
-        }
-    }
-
-    return 1;
-}
-
-void init_layer_params(DenseLayer *layer){
-    // CALCOLO DEL LIMITE DI XAVIER (GLOROT)
-    // Formula: sqrt(6 / (in_dim + out_dim))
-    // Questo mantiene la varianza del segnale stabile attraverso i layer
-    float limit = sqrtf(6.0f / (float)(layer->in_dim + layer->out_dim));
-
-    for (int i = 0; i < layer->out_dim; ++i) {
-        for (int j = 0; j < layer->in_dim; ++j){
-            // Generiamo un numero tra -limit e +limit
-            // frand() -> [0, 1]
-            // frand() - 0.5 -> [-0.5, 0.5]
-            // * 2.0 -> [-1.0, 1.0]
-            // * limit -> [-limit, limit]
-            layer->W[i][j] = (frand() - 0.5f) * 2.0f * limit;
-
-            // Azzera gradienti e momenti
-            layer->dW[i][j] = 0.0f;
-            layer->mW[i][j] = 0.0f;
-            layer->vW[i][j] = 0.0f;
-        }
-
-        // Bias inizializzati a 0
-        layer->b[i] = 0.0f;
-        layer->db[i] = 0.0f;
-        layer->mb[i] = 0.0f;
-        layer->vb[i] = 0.0f;
-    }
-}
-
-
-int dense_init(DenseLayer *layer, int in_dim, int out_dim, ActivationType activation){
-    layer->in_dim = in_dim;
-    layer->out_dim = out_dim;
+    layer->in_dim     = in_dim;
+    layer->out_dim    = out_dim;
     layer->activation = activation;
 
-    //allocations
-    if (!alloc_2d(&layer->W, out_dim, in_dim)) return 0;
-    if (!alloc_2d(&layer->dW, out_dim, in_dim)) return 0;
-    if (!alloc_2d(&layer->mW, out_dim, in_dim)) return 0;
-    if (!alloc_2d(&layer->vW, out_dim, in_dim)) return 0;
+    // Una sola allocazione per l'intero layer: 4 matrici + 5 vettori.
+    const size_t n_w     = (size_t)out_dim * (size_t)in_dim;
+    const size_t n_total = 4u * n_w + 5u * (size_t)out_dim;
 
-    layer->b  = malloc(out_dim * sizeof(float));
-    layer->out = malloc(out_dim * sizeof(float));
-    layer->db = malloc(out_dim * sizeof(float));
-    layer->mb = malloc(out_dim * sizeof(float));
-    layer->vb = malloc(out_dim * sizeof(float));
-    if (!layer->b || !layer->db || !layer->mb || !layer->vb || !layer->out) return 0;
+    float *arena = malloc(n_total * sizeof(float));
+    if (!arena) return 0;
 
-    //init_layer_params(layer);
+    layer->W   = arena;              // base dell'arena, la libera dense_free()
+    layer->dW  = layer->W  + n_w;
+    layer->mW  = layer->dW + n_w;
+    layer->vW  = layer->mW + n_w;
+
+    float *v   = arena + 4u * n_w;
+    layer->b   = v;                  // init_layer_params azzera b..vb in blocco,
+    layer->db  = v +      out_dim;   // quindi quest'ordine non va cambiato senza
+    layer->mb  = v + 2u * out_dim;   // aggiornare anche la memset la' dentro
+    layer->vb  = v + 3u * out_dim;
+    layer->out = v + 4u * out_dim;
+
+    init_layer_params(layer);
     return 1;
+}
+
+void dense_free(DenseLayer *layer) {
+    if (!layer || !layer->W) return;
+    free(layer->W);                  // libera l'intera arena in un colpo
+    layer->W = layer->dW = layer->mW = layer->vW = NULL;
+    layer->b = layer->db = layer->mb = layer->vb = layer->out = NULL;
 }
