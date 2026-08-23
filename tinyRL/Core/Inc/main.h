@@ -80,6 +80,14 @@ void Error_Handler(void);
  * Deve corrispondere al TIME_LOG di hil_trainer_continuous.py lato PC. */
 #define TIME_LOG 1
 
+/* Micro-benchmark dei kernel all'avvio (tanhf/expf/logf/atanhf/sqrtf e i due
+ * forward completi), per attribuire il costo del forward. Emette righe
+ * "<<<BENCH>>>" su UART prima del loop di training. Il trainer lato PC le
+ * tollera senza modifiche (cerca "<<<PROF>>>" e 0x02, il testo non contiene
+ * nessuno dei due), quindi si puo' attivare anche durante una sessione
+ * normale: serve una run sola per avere i numeri. */
+#define BENCH_KERNELS 0
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

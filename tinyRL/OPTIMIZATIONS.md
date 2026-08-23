@@ -1,703 +1,438 @@
-# Ottimizzazioni di Memoria e Codice — tinyRL su STM32H7
+# Ottimizzazioni di Memoria e Tempo — tinyRL (PPO su STM32H743)
 
-Questo documento cataloga tutte le ottimizzazioni presenti nel codebase e quelle
-proposte per versioni future. L'obiettivo è rendere ogni scelta replicabile su
-qualsiasi porting dello stesso algoritmo (DQN, PPO, REINFORCE) su MCU con memoria
-limitata.
+Catalogo delle ottimizzazioni presenti nel codebase, con la misura di partenza
+e quella di arrivo. L'obiettivo è che ogni scelta sia replicabile su qualsiasi
+porting dello stesso algoritmo su MCU con memoria limitata, quindi ogni voce
+chiude con la regola generale che ne sta dietro.
 
----
+Configurazione di riferimento: STM32H743 a 480 MHz (VOS0), actor e critic
+`[11, 32, 32, ·]`, `ROLLOUT_STEPS = 512`, `PPO_EPOCHS = 8`, `PPO_BATCH_SIZE = 64`,
+compilato `-Ofast -mfpu=fpv5-d16 -mfloat-abi=hard` con newlib-nano.
+Topologia e rollout sono allineati al branch NUCLEO-F446RE: i tempi delle due
+schede sono confrontabili solo a parità di rete e di step per update.
 
-## Parte 1 — Ottimizzazioni già implementate
+## Baseline
 
-### 1.1 — Re-Forward: zero overhead di cache delle attivazioni
+Media su 106 update, da `Micro_RL/learning_curve_comparison/mcu_timings_1.csv`:
 
-**File:** `neural_net.c` → `dqn_backward`, `dqn.c` → `dqn_train`
-
-L'approccio naive al training su mini-batch richiede di memorizzare le attivazioni
-intermedie di ogni sample del batch prima di eseguire la backpropagation:
-
-```
-// Approccio naive (inapplicabile su MCU)
-for b in batch:
-    forward(s[b])  → salva layer[0].out, layer[1].out, ... in cache[b]
-for b in batch:
-    backward()     ← legge da cache[b]
-
-Memoria extra: batch_size × Σ(dim_layer) × 4 byte
-Esempio: batch=32, rete [3,64,64,5] → 32 × 133 × 4 ≈ 17 KB extra
-```
-
-Il Re-Forward esegue un forward pass immediatamente prima di ogni backward,
-sfruttando il fatto che `layer->out` è uno slot fisso riscritto ad ogni chiamata:
-
-```
-// Re-Forward (approccio adottato)
-for b in batch:
-    forward_q(online, s[b])      → scrive layer[i].out  (sovrascrive il precedente)
-    forward_target(target, s[b]) → scrive target.out     (struttura separata)
-    calcola td_error
-    dqn_backward(online, s[b], a, td_error)  ← legge layer[i].out ancora validi
-    accumula dW, db
-    → le attivazioni vengono BUTTATE al prossimo campione
-```
-
-Il costo è un forward pass extra per sample (pagato in cicli), non in RAM.
-Il campo `DenseLayer.out` (`out_dim` float) è l'unico slot di attivazione,
-riusato per ogni sample e per ogni layer in sequenza.
-
-**Regola generale:** su MCU preferire sempre ricalcolo a caching quando la rete
-è piccola (< 128 neuroni per layer). Il break-even dipende dal clock e dalla RAM
-disponibile; su Cortex-M7 a 480 MHz il ricalcolo di un layer 64×64 costa ~13 µs.
-
----
-
-### 1.2 — Target network senza momenti Adam
-
-**File:** `neural_net.h` → `TargetLayer`, `neural_net.c` → `init_target_network`
-
-La target network viene usata solo per l'inferenza (forward pass). Non viene
-mai allenata direttamente, quindi non ha bisogno dei tensori per l'ottimizzatore.
-
-```c
-// DenseLayer (online): 9 array per layer
-//   W, dW, mW, vW  (matrici out×in)
-//   b, db, mb, vb, out  (vettori out)
-
-// TargetLayer (target): 3 array per layer
-//   W, b, out
-```
-
-Per la topologia `[3, 64, 64, 5]`:
-
-| Struttura | Floats | Byte |
+| voce | ms | costo unitario implicito |
 |---|---|---|
-| Online (DenseLayer × 3) | ~19.700 | ~77 KB |
-| Target (TargetLayer × 3) | ~4.800 | ~19 KB |
-| Target se fosse DenseLayer | ~19.700 | ~77 KB |
+| `ppo_update` totale | 790 | 8 epoche × 512 campioni = 4096 iterazioni |
+| forward | 312 | ~12,7 cicli per MAC |
+| backward | 443 | ~10,3 cicli per MAC |
+| adam | 31 | ~78 cicli per parametro |
 
-Risparmio: ~58 KB su questa configurazione. Il risparmio scala con
-`6 × Σ(out_dim × in_dim + out_dim)` (i 6 array eliminati: dW, mW, vW, db, mb, vb).
-
-**Regola generale:** qualsiasi rete che svolge solo inferenza (actor frozen,
-target network, ensemble member read-only) va dichiarata senza ottimizzatore.
-
----
-
-### 1.3 — Replay buffer con allocazione contigua
-
-**File:** `dqn.c` → `replay_buffer_init`
-
-Un replay buffer con `capacity` transizioni e osservazione di dimensione `obs_dim`
-naïvemente allocherebbe ogni stato con una `malloc` separata:
-
-```c
-// Approccio naïve: capacity × 2 malloc separate per gli stati
-for (int i = 0; i < capacity; i++) {
-    buf->state[i]      = malloc(obs_dim * sizeof(float));  // frammentazione
-    buf->next_state[i] = malloc(obs_dim * sizeof(float));
-}
-```
-
-Su MCU con heap piccola, dopo centinaia di `malloc`/`free` l'heap si frammenta
-e le allocazioni successive falliscono anche se la memoria totale sarebbe sufficiente.
-
-La soluzione adottata è un blocco contiguo con array di puntatori:
-
-```c
-// Un unico malloc per tutti gli stati
-buf->state_pool = malloc(capacity * obs_dim * sizeof(float));
-buf->snext_pool = malloc(capacity * obs_dim * sizeof(float));
-
-// Array di puntatori alle righe
-buf->state      = malloc(capacity * sizeof(float *));
-buf->next_state = malloc(capacity * sizeof(float *));
-
-for (uint32_t i = 0; i < capacity; i++) {
-    buf->state[i]      = buf->state_pool + i * obs_dim;
-    buf->next_state[i] = buf->snext_pool + i * obs_dim;
-}
-```
-
-Vantaggi:
-- Solo `2 + 2 = 4` allocazioni totali invece di `2 × capacity`
-- Accesso sequenziale ai dati durante il campionamento (cache-friendly)
-- `free` è sempre riuscita: non si può liberare parzialmente un blocco contiguo
-
-**Regola generale:** qualsiasi struttura dati con array 2D di dimensione nota a
-init-time va allocata con un unico blocco piatto + array di puntatori di riga.
+Nessuno di questi numeri era vicino al floor dell'hardware: su Cortex-M7 la
+`VFMA.F32` ha throughput di 1/ciclo. Il resto del documento spiega dove
+finivano gli altri cicli.
 
 ---
 
-### 1.4 — Gradiente sparso al layer di uscita
+## Parte 1 — Struttura dei dati
 
-**File:** `neural_net.c` → `dqn_backward`
+### 1.1 — Un'unica arena contigua per layer
 
-La loss del DQN è `L = 0.5 × (Q_online(s,a) − target_val)²`. Il gradiente
-rispetto all'output è non-zero solo per l'azione scelta:
+**File:** `dense_layer.c`, `dense_layer.h`
 
-```
-dL/dQ[i] = td_error   se i == action
-dL/dQ[i] = 0.0f       altrimenti
-```
-
-Il vettore `delta_out` viene inizializzato a zero e poi impostato solo in
-posizione `action`, eliminando il lavoro per tutti gli altri output:
-
-```c
-static float delta_out[N_ACTIONS];
-for (int i = 0; i < out_dim; i++) delta_out[i] = 0.0f;
-delta_out[action] = td_error;
-```
-
-Per `N_ACTIONS = 5` questo dimezza il lavoro di accumulo gradienti al layer finale
-rispetto a una loss full-vector (dove tutti gli output contribuiscono).
-
-**Regola generale:** nelle reti DQN con output discreto, la sparsità del gradiente
-di output è strutturale e non va sprecata.
-
----
-
-### 1.5 — Buffer temporanei backprop con allocazione `static` e lazy
-
-**File:** `neural_net.c` → `dqn_backward`
-
-Il vettore `delta` che si propaga verso l'input cambia dimensione ad ogni layer.
-Invece di allocarlo e liberarlo ad ogni chiamata, si usa un buffer statico con
-riallocazione lazy solo quando la dimensione cresce:
-
-```c
-static float *delta_buf = NULL;
-static uint32_t delta_cap = 0;
-
-if ((uint32_t)in_dim > delta_cap) {
-    free(delta_buf);
-    delta_buf = malloc(in_dim * sizeof(float));
-    delta_cap = (uint32_t)in_dim;
-}
-```
-
-Il buffer viene riallocato al massimo una volta per la rete più grande incontrata.
-In pratica, su topologia fissa nota a compile-time, non viene mai riallocato dopo
-il primo step.
-
-**Regola generale:** buffer temporanei a dimensione variabile-ma-limitata vanno
-dichiarati `static` con capacità tracciata. Evita `malloc`/`free` nel loop di
-training critico.
-
----
-
-### 1.6 — Q-values su stack con dimensione fissa a compile-time
-
-**File:** `dqn.c` → `dqn_train`, `dqn_select_action`
-
-I vettori di output della rete (Q-values) sono piccoli e di dimensione nota:
-
-```c
-float q_online[N_ACTIONS];  // stack, 5 float = 20 byte
-float q_tgt[N_ACTIONS];     // stack
-```
-
-Usando `#define N_ACTIONS` come costante di compilazione si ottiene un array
-di dimensione fissa sullo stack, senza `malloc`. Il compilatore può tenere questi
-valori in registri se `N_ACTIONS` è abbastanza piccolo (< 8 circa).
-
-**Regola generale:** tutti i vettori intermedi la cui dimensione è nota a
-compile-time vanno dichiarati sullo stack con dimensione costante.
-
----
-
-### 1.7 — `restrict` e `const` per aiutare il compilatore
-
-**File:** `neural_net.c` → `forward_dense_layer`, `adam_update_single_layer`
-
-```c
-static inline void forward_dense_layer(const float *restrict in_vec,
-                                        float *restrict out_vec,
-                                        const DenseLayer *restrict layer)
-```
-
-`restrict` garantisce al compilatore che `in_vec`, `out_vec` e `layer` non si
-sovrappongono in memoria. Questo abilita l'auto-vectorizzazione su Cortex-M7
-(che ha FPU con pipeline a 2 stage) e rimuove i memory-aliasing barriers
-nell'inner loop.
-
-`const` sui puntatori input permette al compilatore di caricare il valore una
-volta sola in registro invece di rileggerlo dalla memoria ad ogni iterazione.
-
-**Regola generale:** aggiungere `restrict` a tutti i puntatori di funzione che
-non si sovrappongono mai. Non ha costo runtime, solo benefici.
-
----
-
-### 1.8 — Softmax numericamente stabile
-
-**File:** `neural_net.c` → `softmax`
-
-La versione naïve di softmax (`exp(x[i]) / Σ exp(x[j])`) causa overflow float
-per logit grandi (> ~88). La versione stabile sottrae il massimo prima di `exp`:
-
-```c
-float max = in[0];
-for (int i = 1; i < n; ++i)
-    if (in[i] > max) max = in[i];
-
-float sum = 0.f;
-for (int i = 0; i < n; ++i) {
-    out[i] = expf(in[i] - max);   // sempre ≤ 1, mai overflow
-    sum += out[i];
-}
-
-float inv = 1.f / sum;            // una divisione, n moltiplicazioni
-for (int i = 0; i < n; ++i)
-    out[i] *= inv;
-```
-
-La divisione (costosa su Cortex-M7, ~14 cicli) viene eseguita una volta sola;
-la normalizzazione usa moltiplicazioni per `inv`.
-
-**Regola generale:** sostituire sempre `x / sum` con `x * (1/sum)` nei loop.
-
----
-
-### 1.9 — Bias correction Adam precalcolata fuori dal loop
-
-**File:** `neural_net.c` → `adam_optimizer_q`
-
-I fattori di bias correction `b1t = 1 - β1^t` e `b2t = 1 - β2^t` sono
-costanti per tutti i pesi durante un singolo passo di ottimizzazione. Vengono
-calcolati una volta e passati come argomento:
-
-```c
-void adam_optimizer_q(QNetwork *net) {
-    net->adam_t++;
-    float b1t = 1.f - powf(BETA1, (float)net->adam_t);  // calcolato UNA volta
-    float b2t = 1.f - powf(BETA2, (float)net->adam_t);
-    for (int l = 0; l < net->num_layers; l++)
-        adam_update_single_layer(&net->layers[l], b1t, b2t);
-}
-```
-
-Senza questo, `powf` verrebbe chiamata `2 × num_weights` volte invece di 2.
-Per la rete `[3,64,64,5]` sono circa 9.000 chiamate `powf` risparmiate per step.
-
-**Regola generale:** qualsiasi valore costante all'interno di un loop va
-sollevato fuori dal loop (loop invariant code motion — il compilatore lo fa
-spesso, ma è meglio farlo esplicitamente per chiarezza e sicurezza).
-
----
-
-### 1.10 — `inv_batch` per normalizzare il gradiente senza divisioni nel loop
-
-**File:** `dqn.c` → `dqn_train`
-
-Il gradiente medio del mini-batch è `dL/dθ = (1/batch_size) × Σ grad_i`.
-Invece di dividere ogni `td_error` per `batch_size` dentro il loop:
-
-```c
-float inv_batch = 1.0f / (float)batch_size;  // una divisione fuori dal loop
-for (uint32_t b = 0; b < batch_size; b++) {
-    ...
-    dqn_backward(online, s, act, td_error * inv_batch);  // moltiplicazione
-}
-```
-
-**Regola generale:** stessa logica del punto 1.8 — le divisioni costano più
-delle moltiplicazioni su FPU embedded.
-
----
-
-### 1.11 — Profiling con DWT cycle counter
-
-**File:** `utils.c/h` → `dwt_init`, `dwt_ticks`, `dwt_delta`
-
-Il Data Watchpoint and Trace (DWT) del Cortex-M7 ha un contatore di cicli a 32
-bit incrementato ogni ciclo di clock, accessibile senza overhead rilevante:
-
-```c
-uint32_t t0 = dwt_ticks();
-dqn_train(...);
-uint32_t cycles = dwt_delta(t0, dwt_ticks());
-// cycles_to_us(cycles) → durata in microsecondi
-```
-
-L'overflow a 32 bit avviene ogni ~8.9 secondi a 480 MHz; `dwt_delta` gestisce
-l'overflow automaticamente con l'aritmetica modulare `(stop - start)`.
-
-**Regola generale:** usare DWT invece di `HAL_GetTick()` (risoluzione 1 ms) per
-misurare porzioni di codice critiche. Non richiede timer hardware aggiuntivi.
-
----
-
-## Parte 2 — Ottimizzazioni proposte
-
-### 2.1 — Allocazione 2D contigua in `alloc_2d`
-
-**File da modificare:** `dense_layer.c` → `alloc_2d`, `free_2d`
-
-**Problema attuale:**
+La versione precedente usava `float **` per ognuna delle quattro matrici
+(`W`, `dW`, `mW`, `vW`): un array di puntatori di riga più una `calloc`
+separata per ogni riga.
 
 ```c
 *matrix = malloc(rows * sizeof(float *));
 for (int i = 0; i < rows; ++i)
-    (*matrix)[i] = calloc(cols, sizeof(float));  // rows allocazioni separate
+    (*matrix)[i] = calloc(cols, sizeof(float));   // rows allocazioni
 ```
 
-Per una rete `[3,64,64,5]`, le 3 matrici peso W (più dW, mW, vW) generano
-`4 × (64 + 64 + 5) = 532` allocazioni separate solo per i pesi. Ogni riga di
-ogni matrice è in un indirizzo heap arbitrario.
+Per actor + critic sono **592 allocazioni**, 94,1 KB di heap per 86,4 KB di
+dati utili. Il grosso dello spreco è il padding: una riga da 11 float occupa
+44 byte, che newlib-nano arrotonda a 48 più 8 di header = **56 byte, il 27% di
+overhead** sulle matrici del primo layer. Gli array di puntatori di riga da
+soli sono 2,1 KB.
 
-**Effetti negativi:**
-- Durante il forward pass `acc += w_row[j] * in_vec[j]` l'accesso a `w_row` è
-  sequenziale (buono), ma passare da una riga all'altra richiede di caricare un
-  nuovo indirizzo dal pointer array (una indirezione + potenziale cache miss).
-- Con molte allocazioni piccole, la heap si frammenta e il `malloc` interno
-  (newlib nano su STM32) degrada in complessità.
-- `free_2d` richiede `rows + 1` chiamate `free`.
+Ora ogni layer vive in una sola `malloc`, con le quattro matrici e i cinque
+vettori come viste dentro l'arena e le matrici in row-major (`W[i*in_dim + j]`):
 
-**Soluzione — blocco dati contiguo:**
+| | prima | dopo |
+|---|---|---|
+| allocazioni | 592 | 9 |
+| heap | 94,1 KB | 86,4 KB |
+| overhead | 7,8 KB | 0,1 KB |
 
-```c
-int alloc_2d(float ***matrix, int rows, int cols) {
-    if (rows <= 0 || cols <= 0 || !matrix) return 0;
+Il beneficio non è solo di spazio: sparisce un livello di indirezione da ogni
+loop interno (prima ogni riga costava una load del puntatore prima di poter
+leggere i dati) e le righe sono contigue, quindi il prefetcher della D-cache
+lavora. Su H743 i 7,7 KB non si notano fra 512 KB, ma sul branch F446 — 128 KB
+totali per ~96 KB di working set — sono la differenza fra starci e non starci.
 
-    // Un unico blocco per tutti i dati
-    float *data = calloc(rows * cols, sizeof(float));
-    if (!data) return 0;
+Il rollout buffer ha ricevuto lo stesso trattamento: 8 `malloc` → 1, il che
+elimina anche il percorso di fallimento parziale (se la settima `malloc`
+falliva, le prime sei restavano allocate e la init tornava 0).
 
-    // Array di puntatori di riga
-    *matrix = malloc(rows * sizeof(float *));
-    if (!*matrix) { free(data); return 0; }
-
-    for (int i = 0; i < rows; ++i)
-        (*matrix)[i] = data + i * cols;
-
-    return 1;
-}
-
-int free_2d(float ***matrix, int rows) {
-    (void)rows;                  // non più necessario
-    if (!matrix || !*matrix) return 0;
-    free((*matrix)[0]);          // libera il blocco dati contiguo
-    free(*matrix);               // libera l'array di puntatori
-    *matrix = NULL;
-    return 1;
-}
-```
-
-**Effetti positivi:**
-- Le righe di W sono contigue in memoria: l'inner loop del forward pass
-  (`acc += W[i][j] * in[j]`) tocca indirizzi sequenziali per ogni riga.
-- Da `rows + 1` allocazioni a esattamente **2 allocazioni** per matrice.
-- `free_2d` non ha più bisogno del parametro `rows` (backward-compatible
-  poiché il valore viene ignorato).
-- Il D-cache del Cortex-M7 (32 KB, 8-way associative, line da 32 byte) può
-  prefetchare le righe successive.
-
-**Attenzione:** `(*matrix)[0]` deve essere il puntatore al blocco base. Questa
-invariante è garantita dal loop `(*matrix)[i] = data + i * cols` dove `i=0`
-dà esattamente `data`. Non mischiare questa `alloc_2d` con allocazioni create
-in modo diverso.
+> **Regola generale:** ogni struttura 2D con dimensioni note a init-time va in
+> un unico blocco piatto con indicizzazione `i*stride + j`. L'array di
+> puntatori di riga costa memoria, frammenta l'heap e aggiunge una
+> dipendenza di load nel loop più caldo del programma.
 
 ---
 
-### 2.2 — Loop swap nel backward pass per W^T·δ
+### 1.2 — Re-Forward: zero cache delle attivazioni
 
-**File da modificare:** `neural_net.c` → `dqn_backward`
+**File:** `neural_net.c`, `ppo.c` → `ppo_update`
 
-**Problema attuale:**
+L'approccio naïve al training su mini-batch memorizza le attivazioni
+intermedie di ogni campione prima della backpropagation:
+
+```
+for b in batch: forward(s[b]) -> salva le attivazioni in cache[b]
+for b in batch: backward()    <- legge da cache[b]
+
+Memoria extra: batch_size × Σ(dim_layer) × 4 byte
+```
+
+Il Re-Forward esegue invece un forward immediatamente prima di ogni backward,
+sfruttando il fatto che `DenseLayer.out` è uno slot fisso riscritto ad ogni
+chiamata. Il costo è un forward extra per campione, pagato in cicli e non in
+RAM. Per `[11,32,32,3]` con batch 64 sono ~19 KB di RAM risparmiati.
+
+> **Regola generale:** su MCU preferire il ricalcolo al caching quando la rete
+> è piccola. Il break-even dipende da clock e RAM disponibile.
+
+---
+
+## Parte 2 — Il loop caldo
+
+### 2.1 — Blocking 2×1 e catene di accumulo indipendenti
+
+**File:** `neural_net.c` → `forward_dense_layer`, `backward_from_delta`
+
+Il prodotto scalare scritto nel modo ovvio è una catena FMA **seriale**:
+
+```c
+for (int j = 0; j < in_dim; ++j)
+    acc += w_row[j] * in_vec[j];    // ogni iterazione dipende dalla precedente
+```
+
+Sul Cortex-M7 la `VFMA.F32` ha throughput 1/ciclo ma **latenza ~3 cicli**: una
+riduzione seriale costa quindi ~3 cicli per MAC di sola latenza, tre volte il
+floor. In più servono due load per MAC e la M7 ne ritira una per ciclo.
+
+GCC non lo sistema da solo. Lo splitting di una riduzione in accumulatori
+multipli arriva normalmente dalla vettorizzazione, ma la M7 ha una FPU
+**scalare**: nessun vettore, nessuno splitting. `-Ofast` autorizza la
+riassociazione ma non riscrive la catena di dipendenza.
+
+Elaborare due righe di output per iterazione risolve entrambi i problemi:
+
+```c
+for (; i + 1 < out_dim; i += 2) {
+    const float *restrict w0 = W + (size_t)i * in_dim;
+    const float *restrict w1 = w0 + in_dim;
+    float acc0 = b[i], acc1 = b[i + 1];
+    for (int j = 0; j < in_dim; ++j) {
+        float x = in_vec[j];          // una load per DUE MAC
+        acc0 += w0[j] * x;            // due catene indipendenti
+        acc1 += w1[j] * x;
+    }
+    ...
+}
+```
+
+Stesso trattamento per l'accumulo `dW[i][:] += delta[i]*inp[:]` nel backward.
+
+> **Regola generale:** una riduzione in virgola mobile scritta con un solo
+> accumulatore gira alla latenza della FMA, non al suo throughput. Su FPU
+> scalare il compilatore non lo aggiusta: servono accumulatori multipli
+> scritti a mano.
+
+---
+
+### 2.2 — Loop swap in `W^T·δ`
+
+**File:** `neural_net.c` → `backward_from_delta`
+
+La propagazione del delta era scritta con `j` esterno e `i` interno:
 
 ```c
 for (int j = 0; j < in_dim; ++j) {
-    float acc = 0.0f;
+    float acc = 0.f;
     for (int i = 0; i < out_dim; ++i)
-        acc += delta[i] * ly->W[i][j];   // accesso a colonna j di W
-    // applica derivata attivazione...
+        acc += delta[i] * ly->W[i][j];   // colonna j: stride in_dim
     delta_buf[j] = acc;
 }
 ```
 
-Il prodotto matrice-vettore `W^T · delta` è scritto con `j` in outer loop e
-`i` in inner loop. Questo accede a `W[0][j], W[1][j], ..., W[out_dim-1][j]`:
-elemento `j` di righe diverse, cioè un accesso per colonna su una matrice
-row-major. Ogni `W[i]` è un puntatore diverso (con la `alloc_2d` attuale,
-anche a un indirizzo heap diverso) → cache miss ad ogni iterazione di `i`.
+Cioè un accesso **per colonna** su una matrice row-major: elementi consecutivi
+distano `in_dim` float, e con il vecchio layout a puntatori di riga ognuno
+stava anche in un blocco heap diverso. In più l'accumulo su `acc` è di nuovo
+seriale.
 
-Per un layer 64×64: 64 × 64 = 4096 accessi, ognuno con stride di 64 float
-(256 byte), molto maggiore della cache line (32 byte) → quasi 0% hit rate
-sulla dimensione `i`.
-
-**Soluzione — outer loop su righe di W:**
+Invertendo i loop e accumulando in un buffer, l'accesso diventa sequenziale
+sulla riga e ogni `j` ha il proprio accumulatore:
 
 ```c
-// Accumula W^T · delta con accesso per riga (cache-friendly)
-memset(delta_buf, 0, in_dim * sizeof(float));
+memset(dst, 0, in_dim * sizeof(float));
 for (int i = 0; i < out_dim; ++i) {
     float di = delta[i];
-    const float *restrict w_row = ly->W[i];   // w_row è sequenziale
+    const float *restrict w_row = ly->W + (size_t)i * in_dim;
     for (int j = 0; j < in_dim; ++j)
-        delta_buf[j] += di * w_row[j];         // accesso sequenziale a w_row
-}
-
-// Applica derivata attivazione (separata dal prodotto)
-const float    *h_prev = net->layers[l - 1].out;
-ActivationType  act    = net->layers[l - 1].activation;
-
-switch (act) {
-case ACT_RELU:
-    for (int j = 0; j < in_dim; ++j)
-        if (h_prev[j] <= 0.f) delta_buf[j] = 0.f;
-    break;
-case ACT_TANH:
-    for (int j = 0; j < in_dim; ++j) {
-        float hp = h_prev[j];
-        delta_buf[j] *= (1.f - hp * hp);
-    }
-    break;
-default: break;
+        dst[j] += di * w_row[j];
 }
 ```
 
-Ora l'inner loop accede a `w_row[0], w_row[1], ..., w_row[in_dim-1]`:
-accesso sequenziale per riga → il prefetcher del Cortex-M7 può precaricare
-le cache line successive.
+La derivata dell'attivazione va in una passata separata, il che toglie anche
+uno `switch` dall'interno del loop.
 
-Beneficio aggiuntivo: separare il prodotto dalla derivata di attivazione
-permette al compilatore di vettorizzare i due loop indipendentemente.
-
-**Regola generale:** nei prodotti matrice-vettore `W^T · v`, iterare sempre
-sulle righe di W nell'outer loop e accumulare in un buffer separato.
+> **Regola generale:** nei prodotti `W^T·v` iterare sempre sulle righe di W
+> nel loop esterno, accumulando in un buffer. Mai leggere una matrice
+> row-major per colonna.
 
 ---
 
-### 2.3 — Unificazione di `forward_dense_layer` e `forward_target_layer`
+### 2.3 — Ping-pong sul buffer del delta
 
-**File da modificare:** `neural_net.c`
+**File:** `neural_net.c` → `backward_from_delta`
 
-Le due funzioni sono identiche riga per riga. L'unica differenza è il tipo
-del parametro (`DenseLayer *` vs `TargetLayer *`), ma i campi usati
-(`in_dim`, `out_dim`, `activation`, `W`, `b`, `out`) esistono in entrambi.
+Conseguenza diretta del punto precedente, e la ragione per cui va menzionato:
+il delta del layer precedente si **scrive** mentre quello corrente è ancora in
+**lettura**, e dal secondo layer in poi i due sono lo stesso buffer
+(`delta = delta_buf` alla fine di ogni iterazione). Con un buffer solo,
+scrivere l'elemento `j` corrompe il `delta[j]` che serve ancora alle
+iterazioni successive.
 
-**Soluzione A — funzione con puntatori espliciti:**
+Il buffer è quindi un pool a due metà usate a ping-pong, dimensionato una
+volta sul layer più largo **prima** di iniziare la passata: una `realloc` a
+metà strada invaliderebbe il delta in uso.
 
-```c
-static inline void forward_layer_generic(
-    const float    *restrict in_vec,
-    float          *restrict out_vec,
-    const float   **restrict W,
-    const float    *restrict b,
-    int in_dim, int out_dim,
-    ActivationType activation)
-{
-    for (int i = 0; i < out_dim; ++i) {
-        float acc = b[i];
-        const float *restrict w_row = W[i];
-        for (int j = 0; j < in_dim; ++j)
-            acc += w_row[j] * in_vec[j];
-        switch (activation) {
-        case ACT_RELU: out_vec[i] = (acc > 0.f) ? acc : 0.f; break;
-        case ACT_TANH: out_vec[i] = tanhf(acc);               break;
-        default:       out_vec[i] = acc;                       break;
-        }
-    }
-    if (activation == ACT_SOFTMAX)
-        softmax(out_vec, out_vec, out_dim);
-}
-```
+Questo era un bug reale — vedi `BUG_FIXING.md`, BUG-7.
 
-I wrapper specifici diventano:
-
-```c
-static inline void forward_dense_layer(const float *in, float *out,
-                                        const DenseLayer *ly) {
-    forward_layer_generic(in, out,
-        (const float **)ly->W, ly->b,
-        ly->in_dim, ly->out_dim, ly->activation);
-}
-
-static inline void forward_target_layer(const float *in, float *out,
-                                         const TargetLayer *ly) {
-    forward_layer_generic(in, out,
-        (const float **)ly->W, ly->b,
-        ly->in_dim, ly->out_dim, ly->activation);
-}
-```
-
-Poiché entrambi i wrapper sono `static inline`, il compilatore li inlina
-eliminando il call overhead — il codice macchina risultante è identico
-alla versione con duplicazione.
-
-**Regola generale:** codice duplicato con signature diversa ma logica identica
-va unificato in una funzione su tipi primitivi (puntatori flat) e wrappato.
+> **Regola generale:** quando un buffer temporaneo è insieme sorgente e
+> destinazione fra due iterazioni, serve il ping-pong. E se la sua capacità è
+> variabile, dimensionarla prima della passata: riallocare mentre un puntatore
+> vecchio è ancora vivo è un uso-dopo-free silenzioso.
 
 ---
 
-### 2.4 — Fusione di `gradient_norm_q` e `adam_optimizer_q`
+### 2.4 — Costanti sollevate fuori dal loop dei campioni
 
-**File da modificare:** `neural_net.c`
+**File:** `ppo.c` → `ppo_update`, `neural_net.c` → i kernel continui
 
-Nel loop di training, `dqn_train` chiama:
+`g_ppo_log_sigma` è costante per l'intera durata di un update: `ppo_sigma_decay()`
+gira una sola volta, in fondo. Eppure `expf(2*ls)` veniva ricalcolata dentro
+ogni campione, sia nel forward sia nel backward: **24.576 `expf` per update**
+per ottenere sempre gli stessi tre numeri.
 
-```c
-gradient_norm_q(online);   // 1° passata completa su tutti i pesi
-adam_optimizer_q(online);  // 2° passata completa su tutti i pesi
-```
+Ora `var` e `log_var` si calcolano una volta in cima a `ppo_update` e viaggiano
+come parametri.
 
-Le due funzioni iterano entrambe su `net->num_layers × out_dim × in_dim` pesi.
-Se il gradient clipping scatta, tutti i pesi vengono letti tre volte (calcolo
-norma, scala, aggiornamento Adam) invece di due.
-
-**Soluzione — funzione unificata:**
-
-```c
-void clip_and_adam_q(QNetwork *net) {
-    // Passata 1: calcola norma quadratica
-    float gnorm_sq = 0.f;
-    for (int l = 0; l < net->num_layers; l++) {
-        DenseLayer *ly = &net->layers[l];
-        for (int i = 0; i < ly->out_dim; i++) {
-            gnorm_sq += ly->db[i] * ly->db[i];
-            for (int j = 0; j < ly->in_dim; j++)
-                gnorm_sq += ly->dW[i][j] * ly->dW[i][j];
-        }
-    }
-
-    // Fattore di clip (= 1 se non serve clipping)
-    const float CLIP = 0.5f;
-    float gnorm = sqrtf(gnorm_sq);
-    float scale = (gnorm > CLIP) ? (CLIP / gnorm) : 1.0f;
-
-    // Passata 2: scala i gradienti e applica Adam nella stessa iterazione
-    net->adam_t++;
-    float b1t = 1.f - powf(BETA1, (float)net->adam_t);
-    float b2t = 1.f - powf(BETA2, (float)net->adam_t);
-
-    for (int l = 0; l < net->num_layers; l++) {
-        DenseLayer *ly = &net->layers[l];
-        for (int i = 0; i < ly->out_dim; i++) {
-            float db = ly->db[i] * scale;
-            float mb = BETA1 * ly->mb[i] + (1.f - BETA1) * db;
-            float vb = BETA2 * ly->vb[i] + (1.f - BETA2) * db * db;
-            ly->mb[i] = mb; ly->vb[i] = vb;
-            ly->b[i] -= LR * (mb / b1t) / (sqrtf(vb / b2t) + EPS_ADAM);
-            ly->db[i] = 0.f;
-
-            float *restrict dw = ly->dW[i], *restrict mw = ly->mW[i];
-            float *restrict vw = ly->vW[i], *restrict  w = ly->W[i];
-            for (int j = 0; j < ly->in_dim; j++) {
-                float dw_s = dw[j] * scale;
-                float mwj  = BETA1 * mw[j] + (1.f - BETA1) * dw_s;
-                float vwj  = BETA2 * vw[j] + (1.f - BETA2) * dw_s * dw_s;
-                mw[j] = mwj; vw[j] = vwj;
-                w[j] -= LR * (mwj / b1t) / (sqrtf(vwj / b2t) + EPS_ADAM);
-                dw[j] = 0.f;
-            }
-        }
-    }
-}
-```
-
-La funzione esistente `zero_grad_q` diventa ridondante (il reset a zero è
-integrato). Nella chiamata in `dqn_train` si rimuove `zero_grad_q` dal fondo
-e si chiama `clip_and_adam_q` al posto delle due funzioni separate.
-
-**Nota:** il risparmio assoluto è modesto (una passata su ~9.700 float per
-`[3,64,64,5]` a 480 MHz ≈ 2–3 µs). Diventa rilevante su topologie più grandi
-o batch più piccoli dove il rapporto compute/overhead è sfavorevole.
+> **Regola generale:** un valore costante dentro un loop va sollevato fuori
+> esplicitamente. Il compilatore lo fa spesso, ma non attraverso una chiamata
+> di funzione a una libreria matematica che non può dimostrare pura.
 
 ---
 
-### 2.5 — Eliminazione dell'indirezione doppia su `TargetLayer.W`
+### 2.5 — Salvare `z` invece di ricostruirlo
 
-**File da modificare:** `neural_net.h`, `neural_net.c`
+**File:** `ppo.c` → `actor_sample_action`, `rollout_buffer_push`
 
-Attualmente `TargetLayer.W` è `float **` (puntatore a array di puntatori di
-riga), allocato con `alloc_2d`. Se si applica anche l'ottimizzazione 2.1, le
-righe diventano già contigue, ma rimane comunque un livello di indirezione
-(leggi pointer array → poi leggi dati).
+Con il tanh-squashing, `actor_sample_action` calcola `z = mu + exp(ls)*eps` e
+poi `a = tanh(z)`. Nel rollout buffer finiva solo `a`, e i kernel dell'update
+ricostruivano `z = atanhf(a)` ad ogni epoca: **24.576 `atanhf` per update** per
+riottenere un valore che era già stato calcolato.
 
-Per la target network, che ha solo forward pass e nessun aggiornamento
-incrementale, si può usare un layout flat con accesso indicizzato:
+Ora nel buffer va `z` (stessa dimensione, contenuto diverso) e `a` resta
+nell'agente, dove serve solo al reward. Oltre a togliere le `atanhf`, il
+risultato è più **corretto**: il round-trip `atanhf(tanhf(z))` perde
+precisione, e il clamp a `|a| ≤ 1−1e−6` satura `z` a ±7,25, taglio che con
+`sigma_init = 1.5` e `mu` limitato a ±8 scattava davvero.
+
+> **Regola generale:** se una quantità è già stata calcolata a monte,
+> memorizzarla costa meno che ricostruirla — e una ricostruzione che passa per
+> una funzione non invertibile in virgola mobile non è nemmeno esatta.
+
+---
+
+### 2.6 — Termini che si cancellano
+
+**File:** `ppo.c`, `neural_net.c`
+
+Il termine Jacobiano del tanh, `−log(1 − a²)`, dipende **solo dall'azione**,
+che è fissa nel buffer. Compare quindi identico in `log_prob_old` e
+`log_prob_new`, e nel rapporto `exp(lp_new − lp_old)` si cancella
+esattamente. Rimuoverlo da entrambi i siti toglie 3 `logf` per campione più 3
+al campionamento, senza cambiare di una virgola il gradiente.
+
+> **Regola generale:** in PPO solo la *differenza* fra le log-probabilità
+> conta. Ogni termine che non dipende dai parametri della policy è lavoro
+> sprecato, purché lo si tolga da entrambi i lati.
+
+---
+
+### 2.7 — `inv_bsz` ripiegato nel delta
+
+**File:** `ppo.c` → `ppo_update`
+
+Il gradiente medio del minibatch si otteneva con una passata su **tutti** i
+parametri di actor e critic dopo ogni minibatch — 64 volte per update:
 
 ```c
-typedef struct {
-    float   *W_flat;    // [out_dim * in_dim] — righe contigue senza pointer array
-    float   *b;
-    float   *out;
-    int      in_dim;
-    int      out_dim;
-    ActivationType activation;
-} TargetLayer;
+for (ogni layer) for (i) { la->db[i] *= inv_bsz;
+                           for (j) la->dW[i][j] *= inv_bsz; }
 ```
 
-Il forward pass diventa:
+Basta passare `adv_t * inv_bsz` e `PPO_C1 * inv_bsz` alle funzioni di backward:
+la passata sparisce. Il ramo di clipping dipende da `ratio`, non da
+`advantage`, quindi scalare l'advantage non lo sposta.
+
+> **Regola generale:** un fattore di scala applicato a valle su N parametri si
+> può quasi sempre ripiegare a monte su un valore solo.
+
+---
+
+### 2.8 — Adam in forma efficiente
+
+**File:** `neural_net.c` → `adam_update_single_layer`, `network_adam_update`
+
+La forma testuale costa per ogni peso tre divisioni e una radice:
 
 ```c
-static inline void forward_target_layer(...) {
-    for (int i = 0; i < out_dim; ++i) {
-        float acc = b[i];
-        const float *w_row = W_flat + i * in_dim;  // calcolo indirizzo, no deref
-        for (int j = 0; j < in_dim; ++j)
-            acc += w_row[j] * in_vec[j];
-        ...
-    }
-}
+float m_hat = m / b1t;
+float v_hat = v / b2t;
+w -= lr * m_hat / (sqrtf(v_hat) + EPS_ADAM);
 ```
 
-`copy_weights_to_target` diventa una singola `memcpy` per layer invece di
-`out_dim` copie per riga:
+Su Cortex-M7 `VDIV.F32` e `VSQRT.F32` costano ~14 cicli l'una e **non sono
+pipelined**: sono ~56 dei ~78 cicli per parametro misurati. L'Algoritmo 2 di
+Kingma & Ba dà una forma algebricamente identica con una sola divisione:
 
 ```c
-void copy_weights_to_target(QNetwork *src, TargetNetwork *dst) {
-    for (int l = 0; l < src->num_layers; l++) {
-        DenseLayer  *sl = &src->layers[l];
-        TargetLayer *tl = &dst->layers[l];
-        tl->activation = sl->activation;
-        // Una sola memcpy per tutta la matrice
-        memcpy(tl->W_flat, sl->W[0], sl->out_dim * sl->in_dim * sizeof(float));
-        memcpy(tl->b, sl->b, sl->out_dim * sizeof(float));
-    }
-}
+float sb2t  = sqrtf(b2t);              // una volta per update
+float lr_t  = lr * sb2t / b1t;
+float eps_t = EPS_ADAM * sb2t;
+w -= lr_t * m / (sqrtf(v) + eps_t);    // per peso
 ```
 
-**Prerequisito:** questa ottimizzazione richiede che `sl->W[0]` punti all'inizio
-del blocco contiguo — garantito dall'ottimizzazione 2.1.
+L'equivalenza è verificata numericamente in `test/test_equiv.c` (scarto 0).
 
-**Regola generale:** strutture read-only usate solo in forward pass non hanno
-bisogno della flessibilità del pointer array. Un layout flat è più semplice,
-usa meno memoria (si eliminano `out_dim` puntatori per layer) e permette
-`memcpy` bulk.
+> **Regola generale:** divisioni e radici sono l'unica operazione FPU che su
+> M7 non si pipeline. Contarle per elemento, e portare fuori dal loop tutto
+> ciò che non dipende dall'elemento.
+
+---
+
+### 2.9 — Gradient clipping fuso in Adam
+
+**File:** `neural_net.c` → `network_clip_grad`
+
+`network_clip_grad` faceva una passata per la norma e, se il clip scattava, una
+seconda read-modify-write su tutti i parametri; poi Adam li rileggeva. Ora
+ritorna il solo fattore di scala, che Adam applica al volo al caricamento di
+`db`/`dW`: una passata completa in meno per ogni minibatch in cui il clip
+scatta.
+
+Il ramo `!isfinite(gnorm)` ritorna `0.0f` invece di azzerare i gradienti a
+mano: l'effetto è identico (Adam li moltiplica per zero e li ripulisce
+comunque) e risparmia un'altra passata.
+
+> **Regola generale:** se due passate consecutive toccano lo stesso array,
+> chiedersi se la prima possa produrre uno scalare invece di riscrivere i dati.
+
+---
+
+### 2.10 — Softmax numericamente stabile
+
+**File:** `neural_net.c` → `softmax` *(solo modalità discreta)*
+
+La versione naïve va in overflow per logit sopra ~88. Sottrarre il massimo
+prima di `exp` lo evita, e la divisione finale si fa una volta sola
+calcolando `inv = 1/sum` e moltiplicando.
+
+> **Regola generale:** sostituire sempre `x / sum` con `x * (1/sum)` nei loop.
+
+---
+
+### 2.11 — Profiling con il DWT cycle counter
+
+**File:** `utils.c/h`, `ppo.c` (macro `PROF_T`/`PROF_ADD`), `main.c`
+
+Il Data Watchpoint and Trace del Cortex-M7 ha un contatore di cicli a 32 bit
+leggibile senza overhead rilevante — molto meglio di `HAL_GetTick()`, che ha
+risoluzione 1 ms.
+
+Attenzione all'ampiezza: a 480 MHz il contatore wrappa ogni ~8,9 s, meno della
+durata di un update intero. Il totale si accumula quindi a pezzi (uno per
+minibatch) su un `uint64_t`, non con un unico delta start/stop.
+
+`BENCH_KERNELS` in `main.h` attiva un micro-benchmark all'avvio che misura il
+costo per chiamata di `tanhf`, `expf`, `logf`, `atanhf`, `sqrtf` e dei due
+forward completi. Serve ad attribuire il tempo del forward prima di decidere
+dove intervenire. Il trainer lato PC tollera le righe `<<<BENCH>>>` senza
+modifiche — cerca `<<<PROF>>>` per il profiling e `0x02` per i frame azione, e
+il testo ASCII non contiene nessuno dei due — quindi basta una run normale con
+il flag attivo. Al termine il benchmark ripristina l'overrun UART come fa
+`on_train_end`, perché durante i suoi ~0,4 s il PC sta già trasmettendo.
+
+> **Regola generale:** misurare prima di ottimizzare, e misurare con lo
+> strumento che ha la risoluzione giusta.
+
+---
+
+## Parte 3 — Il tetto
+
+Le due reti usano attivazioni diverse: `ACT_TANH` sui due hidden layer
+dell'actor, `ACT_RELU` su quelli del critic. Sono **64 chiamate `tanhf` per
+campione**, 262.144 per update, e newlib le implementa in software.
+
+Sotto il vincolo "solo trasformazioni esatte" quel costo non si tocca. Le
+uniche leve sarebbero un'approssimazione polinomiale — che cambia i numeri e
+va validata sulle learning curve — oppure passare l'actor a ReLU come il
+critic, che cambia l'apprendimento. Il micro-benchmark di `BENCH_KERNELS` dice
+quanto vale davvero sulla scheda: è il primo numero da guardare se si vuole
+riaprire la questione.
+
+Fuori dal perimetro di `ppo_update`, ma vale la pena saperlo: il wall-clock di
+una sessione HIL è dominato dalla UART, non dal training. A 115200 baud un
+round-trip è ~5,4 ms, quindi 512 step costano ~2,8 s contro gli 0,79 s di un
+update. Alzare il baud rate è il singolo intervento più efficace sul tempo
+totale di un esperimento, e non tocca una riga di algoritmo.
 
 ---
 
 ## Riepilogo
 
-### Ottimizzazioni già presenti
-
 | # | Tecnica | File | Categoria |
 |---|---|---|---|
-| 1.1 | Re-Forward: no cache attivazioni | `neural_net.c`, `dqn.c` | Memoria |
-| 1.2 | Target network senza Adam moments | `neural_net.h/c` | Memoria |
-| 1.3 | Replay buffer con blocchi contigui | `dqn.c` | Memoria |
-| 1.4 | Gradiente sparso all'output (DQN) | `neural_net.c` | Computazione |
-| 1.5 | `delta_buf` statico con lazy realloc | `neural_net.c` | Memoria |
-| 1.6 | Q-values su stack con `N_ACTIONS` | `dqn.c` | Memoria |
-| 1.7 | `restrict`/`const` per il compilatore | `neural_net.c` | Computazione |
-| 1.8 | Softmax stabile con `inv = 1/sum` | `neural_net.c` | Computazione |
-| 1.9 | Bias correction Adam fuori dal loop | `neural_net.c` | Computazione |
-| 1.10 | `inv_batch` per normalizzazione batch | `dqn.c` | Computazione |
-| 1.11 | Profiling DWT cycle counter | `utils.c/h` | Strumentazione |
+| 1.1 | Arena contigua per layer e per rollout buffer | `dense_layer.c`, `ppo.c` | Memoria |
+| 1.2 | Re-Forward: nessuna cache delle attivazioni | `neural_net.c`, `ppo.c` | Memoria |
+| 2.1 | Blocking 2×1, accumulatori indipendenti | `neural_net.c` | Tempo |
+| 2.2 | Loop swap in `W^T·δ` | `neural_net.c` | Tempo |
+| 2.3 | Ping-pong sul buffer del delta | `neural_net.c` | Correttezza |
+| 2.4 | `var`/`log_var` sollevate fuori dal loop | `ppo.c` | Tempo |
+| 2.5 | `z` salvato invece che ricostruito con `atanhf` | `ppo.c` | Tempo + precisione |
+| 2.6 | Termine Jacobiano rimosso (si cancella nel ratio) | `ppo.c`, `neural_net.c` | Tempo |
+| 2.7 | `inv_bsz` ripiegato nel delta | `ppo.c` | Tempo |
+| 2.8 | Adam in forma efficiente (1 divisione) | `neural_net.c` | Tempo |
+| 2.9 | Gradient clipping fuso in Adam | `neural_net.c` | Tempo |
+| 2.10 | Softmax stabile con `inv = 1/sum` | `neural_net.c` | Tempo |
+| 2.11 | Profiling DWT + micro-benchmark dei kernel | `utils.c`, `ppo.c`, `main.c` | Strumentazione |
 
-### Ottimizzazioni proposte
+### Risultati misurati
 
-| # | Tecnica | File da modificare | Impatto |
-|---|---|---|---|
-| 2.1 | `alloc_2d` contigua + `free_2d` semplificata | `dense_layer.c` | **Alto** |
-| 2.2 | Loop swap `W^T·δ` in backward | `neural_net.c` | **Alto** |
-| 2.3 | Unifica `forward_dense/target_layer` | `neural_net.c` | Basso |
-| 2.4 | Fonde `gradient_norm_q` + `adam_optimizer_q` | `neural_net.c` | Medio |
-| 2.5 | `TargetLayer` con layout flat `W_flat` | `neural_net.h/c` | Medio |
+| | prima | dopo |
+|---|---|---|
+| heap | 94,1 KB | 86,4 KB |
+| allocazioni | 592 | 9 |
+| `.bss` | 4216 B | 3176 B |
+| `.text` | 29.948 B | 28.612 B |
+| `ppo_update` | 790 ms | *da misurare sulla scheda* |
 
-Le ottimizzazioni **2.1** e **2.2** sono indipendenti tra loro e possono essere
-applicate separatamente. Le ottimizzazioni **2.4** e **2.5** dipendono
-concettualmente da **2.1** (richiedono che W sia contigua per sfruttare
-`memcpy` bulk e la `free_2d` semplificata).
+I numeri di memoria e di dimensione del binario sono verificati
+(`arm-none-eabi-size`). Il tempo di `ppo_update` va rimisurato sulla scheda con
+`TIME_LOG = 1`: la stima a priori è 450–500 ms, ma è una stima.
+
+### Verifica
+
+`make -C test` confronta i kernel ottimizzati contro un'implementazione di
+riferimento ingenua scritta come il codice originale, e `make -C test asan`
+ricontrolla l'aritmetica delle arene sotto AddressSanitizer. Vedi
+`test/README.md`.

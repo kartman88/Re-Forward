@@ -4,67 +4,94 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Profiling: quando TIME_LOG e' 0 le macro spariscono e non lasciano
+ * riferimenti a variabili inesistenti, cosi' il loop caldo di ppo_update resta
+ * leggibile invece di essere spezzato da una dozzina di #if. */
 #if TIME_LOG
 #include "utils.h"   /* dwt_ticks / dwt_delta per il profiling */
 
 TrainTiming g_train_timing = {0};
+
+#define PROF_T(name)       uint32_t name = dwt_ticks()
+#define PROF_ADD(acc, t0)  ((acc) += dwt_delta((t0), dwt_ticks()))
+#else
+#define PROF_T(name)       ((void)0)
+#define PROF_ADD(acc, t0)  ((void)0)
 #endif
 
 // ─── Rollout Buffer ───────────────────────────────────────────────────────────
 
+/* Un'unica arena per l'intero buffer invece di 8 malloc separate: meno header
+ * di heap e nessun percorso di fallimento parziale (prima, se la settima
+ * malloc falliva, le prime sei restavano allocate e la init tornava 0). */
 int rollout_buffer_init(RolloutBuffer *buf, uint32_t T, uint32_t obs_dim) {
-    buf->obs_dim   = obs_dim;
-    buf->head      = 0;
-    buf->size      = 0;
-    buf->capacity  = T;
+    buf->obs_dim  = obs_dim;
+    buf->size     = 0;
+    buf->capacity = T;
 
-    buf->states        = malloc(T * obs_dim * sizeof(float));
-    buf->log_probs_old = malloc(T * sizeof(float));
-    buf->values        = malloc(T * sizeof(float));
-    buf->rewards       = malloc(T * sizeof(float));
-    buf->advantages    = malloc(T * sizeof(float));
-    buf->returns       = malloc(T * sizeof(float));
-    buf->dones         = malloc(T * sizeof(uint8_t));
 #if USE_CONTINUOUS_ACTION
-    buf->actions = malloc(T * N_ACT_DIMS * sizeof(float));
+    const uint32_t n_act = T * N_ACT_DIMS;   /* z pre-squash, un float per dim */
 #else
-    buf->actions = malloc(T * sizeof(uint32_t));
+    const uint32_t n_act = T;                /* indice azione, uint32 = 4 byte */
 #endif
+    /* states + 5 vettori scalari + azioni, tutti a 4 byte; dones a 1 byte. */
+    const size_t n_word = (size_t)T * obs_dim + 5u * T + n_act;
+    const size_t bytes  = n_word * sizeof(float) + (size_t)T;
 
-    if (!buf->states || !buf->log_probs_old || !buf->values  ||
-        !buf->rewards || !buf->advantages   || !buf->returns  ||
-        !buf->actions || !buf->dones)
-        return 0;
+    float *arena = malloc(bytes);
+    if (!arena) return 0;
+    buf->arena = arena;
+
+    float *p = arena;
+    buf->states        = p; p += (size_t)T * obs_dim;
+    buf->log_probs_old = p; p += T;
+    buf->values        = p; p += T;
+    buf->rewards       = p; p += T;
+    buf->advantages    = p; p += T;
+    buf->returns       = p; p += T;
+#if USE_CONTINUOUS_ACTION
+    buf->actions = p; p += n_act;
+#else
+    buf->actions = (uint32_t *)p; p += n_act;
+#endif
+    buf->dones = (uint8_t *)p;
 
     return 1;
 }
 
+void rollout_buffer_free(RolloutBuffer *buf) {
+    free(buf->arena);
+    buf->arena = NULL;
+    buf->size  = 0;
+}
+
 #if USE_CONTINUOUS_ACTION
-void rollout_buffer_push(RolloutBuffer *buf, float *obs, float *action,
+/* `z` e' l'azione PRE-squash: e' quella che serve per rivalutare la gaussiana
+ * durante l'update. L'azione squashata a = tanh(z) serve solo all'ambiente e
+ * al reward, e non entra nel buffer. */
+void rollout_buffer_push(RolloutBuffer *buf, const float *obs, const float *z,
                          float reward, uint8_t done, float log_prob, float value) {
-    if (buf->head >= buf->capacity) return;
-    uint32_t idx = buf->head;
+    if (buf->size >= buf->capacity) return;
+    uint32_t idx = buf->size;
     memcpy(&buf->states[idx * buf->obs_dim], obs, buf->obs_dim * sizeof(float));
-    memcpy(&buf->actions[idx * N_ACT_DIMS], action, N_ACT_DIMS * sizeof(float));
+    memcpy(&buf->actions[idx * N_ACT_DIMS], z, N_ACT_DIMS * sizeof(float));
     buf->rewards[idx]       = reward;
     buf->dones[idx]         = done;
     buf->log_probs_old[idx] = log_prob;
     buf->values[idx]        = value;
-    buf->head++;
     buf->size++;
 }
 #else
-void rollout_buffer_push(RolloutBuffer *buf, float *obs, uint32_t action,
+void rollout_buffer_push(RolloutBuffer *buf, const float *obs, uint32_t action,
                          float reward, uint8_t done, float log_prob, float value) {
-    if (buf->head >= buf->capacity) return;
-    uint32_t idx = buf->head;
+    if (buf->size >= buf->capacity) return;
+    uint32_t idx = buf->size;
     memcpy(&buf->states[idx * buf->obs_dim], obs, buf->obs_dim * sizeof(float));
     buf->actions[idx]       = action;
     buf->rewards[idx]       = reward;
     buf->dones[idx]         = done;
     buf->log_probs_old[idx] = log_prob;
     buf->values[idx]        = value;
-    buf->head++;
     buf->size++;
 }
 #endif
@@ -107,8 +134,6 @@ void normalize_advantages(RolloutBuffer *buf) {
 
 #if USE_CONTINUOUS_ACTION
 
-#define LOG_2PI_PPO  1.8378770664093453f
-
 float g_ppo_log_sigma[N_ACT_DIMS];
 
 void ppo_sigma_init(void) {
@@ -126,32 +151,35 @@ void ppo_sigma_decay(void) {
     }
 }
 
-static float randn(void) {
-    return rng_normal();
-}
-
+/* Restituisce sia l'azione squashata `a` (per l'ambiente e per il reward) sia
+ * la pre-squash `z` (per il buffer). Prima solo `a` veniva salvata e l'update
+ * ricostruiva z = atanhf(a) ad ogni epoca: 6 atanhf per campione per epoca per
+ * riottenere un valore che avevamo gia' qui, per giunta degradato dal clamp a
+ * |a| <= 1-1e-6 che satura z a +-7.25.
+ *
+ * Il termine Jacobiano -log(1 - a^2) non entra in log_prob: dipende solo
+ * dall'azione, fissa nel buffer, quindi compare identico in log_prob_old e
+ * log_prob_new e si cancella nel ratio. */
 void actor_sample_action(Network *actor, float *obs, float *action_out,
-                         float *log_prob_out, float *value_out,
+                         float *z_out, float *log_prob_out, float *value_out,
                          Network *critic) {
     network_forward(actor, obs, NULL);
     float *mu = actor->layers[actor->num_layers - 1].out;
-    for (int i = 0; i < N_ACT_DIMS; i++)
-        mu[i] = fmaxf(fminf(mu[i], MU_CLAMP), -MU_CLAMP);
 
     float log_prob = 0.f;
     for (int i = 0; i < N_ACT_DIMS; i++) {
+        float m   = fmaxf(fminf(mu[i], MU_CLAMP), -MU_CLAMP);
+        mu[i]     = m;
         float ls  = g_ppo_log_sigma[i];
-        float eps = randn();
-        float z   = mu[i] + expf(ls) * eps;
+        float eps = rng_normal();
+        float z   = m + expf(ls) * eps;
+        z_out[i]  = z;
 #if PPO_USE_TANH_SQUASH
-        float a       = tanhf(z);
-        action_out[i] = a;
-        log_prob += -0.5f * (eps * eps + 2.f * ls + LOG_2PI_PPO)
-                    - logf(1.f - a * a + 1e-6f);
+        action_out[i] = tanhf(z);
 #else
         action_out[i] = z;
-        log_prob += -0.5f * (eps * eps + 2.f * ls + LOG_2PI_PPO);
 #endif
+        log_prob += -0.5f * (eps * eps + 2.f * ls + LOG_2PI);
     }
     *log_prob_out = log_prob;
 
@@ -164,7 +192,7 @@ void actor_sample_action(Network *actor, float *obs, float *action_out,
 uint32_t actor_sample_action(Network *actor, float *obs,
                               float *log_prob_out, float *value_out,
                               Network *critic) {
-    static float probs[PPO_N_ACTIONS];
+    float probs[PPO_N_ACTIONS];
     network_forward(actor, obs, probs);
 
     float r = rng_uniform();
@@ -190,14 +218,24 @@ uint32_t actor_sample_action(Network *actor, float *obs,
 void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
     uint32_t N = buf->size;
 
-    static uint32_t idx[ROLLOUT_STEPS];
-#if !USE_CONTINUOUS_ACTION
-    static float probs[PPO_N_ACTIONS];
+    /* ROLLOUT_STEPS entra in 16 bit: 1 KB di .bss invece di 2. */
+    static uint16_t idx[ROLLOUT_STEPS];
+
+#if USE_CONTINUOUS_ACTION
+    /* sigma e' costante per tutta la durata dell'update (ppo_sigma_decay gira
+     * una sola volta, in fondo): var e log_var si calcolano qui una volta sola
+     * invece di 6 expf per campione dentro i kernel. */
+    float var[N_ACT_DIMS], log_var[N_ACT_DIMS];
+    for (int i = 0; i < N_ACT_DIMS; i++) {
+        log_var[i] = 2.f * g_ppo_log_sigma[i];
+        var[i]     = expf(log_var[i]);
+    }
+#else
+    float probs[PPO_N_ACTIONS];
 #endif
 
 #if TIME_LOG
-    /* --- profiling: azzera e avvia i contatori DWT ---
-     * Il totale NON si misura con un unico delta start/stop: il CYCCNT e' a
+    /* Il totale NON si misura con un unico delta start/stop: il CYCCNT e' a
      * 32 bit (wrap ogni ~8.9 s a 480 MHz) mentre un update dura di piu'. Lo
      * accumuliamo a pezzi, uno per minibatch (pochi ms l'uno), su un uint64. */
     g_train_timing = (TrainTiming){0};
@@ -205,7 +243,7 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
     uint32_t _t_chunk = dwt_ticks();
 #endif
 
-    for (uint32_t i = 0; i < N; i++) idx[i] = i;
+    for (uint32_t i = 0; i < N; i++) idx[i] = (uint16_t)i;
 
     network_zero_grad(actor);
     network_zero_grad(critic);
@@ -214,15 +252,19 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
 
         for (uint32_t i = N - 1; i > 0; i--) {
             uint32_t j   = rng_u32() % (i + 1);
-            uint32_t tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
+            uint16_t tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
         }
 
         for (uint32_t start = 0; start < N; start += PPO_BATCH_SIZE) {
             uint32_t end     = start + PPO_BATCH_SIZE;
             if (end > N) end = N;
-            float    inv_bsz = 1.f / (float)(end - start);
+            /* inv_bsz viaggia dentro il delta invece di essere applicato dopo
+             * con una passata su tutti i parametri di actor+critic (64 volte
+             * per update). Il ramo di clipping dipende da ratio, non da
+             * advantage, quindi scalare l'advantage non lo sposta. */
+            float inv_bsz = 1.f / (float)(end - start);
 
-            float log_prob_new, entropy;
+            float log_prob_new;
 
             for (uint32_t bi = start; bi < end; bi++) {
                 uint32_t  t            = idx[bi];
@@ -231,90 +273,53 @@ void ppo_update(Network *actor, Network *critic, RolloutBuffer *buf) {
                 float     ret_t        = buf->returns[t];
                 float     log_prob_old = buf->log_probs_old[t];
 
-#if TIME_LOG
-                uint32_t _tf, _tb;
-#endif
-
 #if USE_CONTINUOUS_ACTION
-                float *a_t = &buf->actions[t * N_ACT_DIMS];
-#if TIME_LOG
-                _tf = dwt_ticks();
-#endif
-                actor_forward_continuous(actor, obs_t, a_t, g_ppo_log_sigma,
-                                         &log_prob_new, &entropy);
-#if TIME_LOG
-                _fwd_cyc += dwt_delta(_tf, dwt_ticks());
-#endif
+                const float *z_t = &buf->actions[t * N_ACT_DIMS];
+
+                PROF_T(_t_af);
+                actor_forward_continuous(actor, obs_t, z_t, var, log_var,
+                                         &log_prob_new);
+                PROF_ADD(_fwd_cyc, _t_af);
+
                 float ratio = expf(fmaxf(fminf(log_prob_new - log_prob_old, 10.f), -10.f));
-#if TIME_LOG
-                _tb = dwt_ticks();
-#endif
-                actor_backward_continuous(actor, obs_t, a_t, g_ppo_log_sigma,
-                                          adv_t, ratio, PPO_CLIP_EPS);
-#if TIME_LOG
-                _bwd_cyc += dwt_delta(_tb, dwt_ticks());
-#endif
+
+                PROF_T(_t_ab);
+                actor_backward_continuous(actor, obs_t, z_t, var,
+                                          adv_t * inv_bsz, ratio, PPO_CLIP_EPS);
+                PROF_ADD(_bwd_cyc, _t_ab);
 #else
                 uint32_t a_t = buf->actions[t];
-#if TIME_LOG
-                _tf = dwt_ticks();
-#endif
+                float    entropy;
+
+                PROF_T(_t_af);
                 actor_forward(actor, obs_t, probs, &log_prob_new, a_t, &entropy);
-#if TIME_LOG
-                _fwd_cyc += dwt_delta(_tf, dwt_ticks());
-#endif
+                PROF_ADD(_fwd_cyc, _t_af);
+
                 float ratio = expf(fmaxf(fminf(log_prob_new - log_prob_old, 10.f), -10.f));
-#if TIME_LOG
-                _tb = dwt_ticks();
-#endif
-                actor_backward(actor, obs_t, a_t, adv_t, ratio,
-                               PPO_CLIP_EPS, PPO_C2);
-#if TIME_LOG
-                _bwd_cyc += dwt_delta(_tb, dwt_ticks());
-#endif
+
+                PROF_T(_t_ab);
+                actor_backward(actor, obs_t, a_t, adv_t * inv_bsz, ratio,
+                               PPO_CLIP_EPS, PPO_C2 * inv_bsz);
+                PROF_ADD(_bwd_cyc, _t_ab);
 #endif
 
-#if TIME_LOG
-                _tf = dwt_ticks();
-#endif
+                PROF_T(_t_cf);
                 critic_forward(critic, obs_t);
-#if TIME_LOG
-                _fwd_cyc += dwt_delta(_tf, dwt_ticks());
-                _tb = dwt_ticks();
-#endif
-                critic_backward(critic, obs_t, ret_t, PPO_C1);
-#if TIME_LOG
-                _bwd_cyc += dwt_delta(_tb, dwt_ticks());
-#endif
+                PROF_ADD(_fwd_cyc, _t_cf);
+
+                PROF_T(_t_cb);
+                critic_backward(critic, obs_t, ret_t, PPO_C1 * inv_bsz);
+                PROF_ADD(_bwd_cyc, _t_cb);
             }
 
-#if TIME_LOG
-            uint32_t _ta = dwt_ticks();
-#endif
-            for (int l = 0; l < (int)actor->num_layers; l++) {
-                DenseLayer *la = &actor->layers[l];
-                for (int i = 0; i < la->out_dim; i++) {
-                    la->db[i] *= inv_bsz;
-                    for (int j = 0; j < la->in_dim; j++)
-                        la->dW[i][j] *= inv_bsz;
-                }
-            }
-            for (int l = 0; l < (int)critic->num_layers; l++) {
-                DenseLayer *lc = &critic->layers[l];
-                for (int i = 0; i < lc->out_dim; i++) {
-                    lc->db[i] *= inv_bsz;
-                    for (int j = 0; j < lc->in_dim; j++)
-                        lc->dW[i][j] *= inv_bsz;
-                }
-            }
-
-            network_clip_grad(actor);
-            network_clip_grad(critic);
-            network_adam_update(actor, PPO_LR_ACTOR);
-            network_adam_update(critic, PPO_LR_CRITIC);
+            PROF_T(_t_adam);
+            float sa = network_clip_grad(actor,  PPO_GRAD_CLIP);
+            float sc = network_clip_grad(critic, PPO_GRAD_CLIP);
+            network_adam_update(actor,  PPO_LR_ACTOR,  sa);
+            network_adam_update(critic, PPO_LR_CRITIC, sc);
 #if TIME_LOG
             uint32_t _now = dwt_ticks();
-            _adam_cyc += dwt_delta(_ta, _now);
+            _adam_cyc += dwt_delta(_t_adam, _now);
             _tot_cyc  += dwt_delta(_t_chunk, _now);   /* chiude il pezzo di totale */
             _t_chunk   = _now;
 #endif
@@ -358,6 +363,7 @@ int ppo_agent_init(PPOAgent *agent, Network *actor, Network *critic,
     memset(agent->prev_obs, 0, sizeof(agent->prev_obs));
 #if USE_CONTINUOUS_ACTION
     memset(agent->prev_action, 0, sizeof(agent->prev_action));
+    memset(agent->prev_z,      0, sizeof(agent->prev_z));
 #else
     agent->prev_action = 0;
 #endif
@@ -384,11 +390,12 @@ void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
     //    prev_done = is_done(s_{t-1}), NON il done corrente. La transizione dello
     //    stato terminale NON viene scartata: verra' spinta alla chiamata
     //    successiva, esattamente come fa la baseline PC.
+    //    Nel buffer va prev_z (pre-squash); il reward usa prev_action (squashata).
     if (!agent->first_step) {
         float reward = agent->reward_fn(agent->prev_obs, agent->prev_action);
         rollout_buffer_push(&agent->buf,
                             agent->prev_obs,
-                            agent->prev_action,
+                            agent->prev_z,
                             reward,
                             agent->prev_done,
                             agent->prev_log_prob,
@@ -397,18 +404,19 @@ void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
 
     // 3. Sample action from current observation
     float log_prob, value_critic;
-    float action[N_ACT_DIMS];
-    actor_sample_action(agent->actor, (float *)obs, action,
+    float action[N_ACT_DIMS], z[N_ACT_DIMS];
+    actor_sample_action(agent->actor, (float *)obs, action, z,
                         &log_prob, &value_critic, agent->critic);
 
-    // 4. Store unclipped action and obs (log_prob consistency requires unclipped)
+    // 4. Store obs, azione squashata (per il reward) e pre-squash (per il buffer)
     memcpy(agent->prev_obs,    obs,    OBS_DIM    * sizeof(float));
     memcpy(agent->prev_action, action, N_ACT_DIMS * sizeof(float));
+    memcpy(agent->prev_z,      z,      N_ACT_DIMS * sizeof(float));
     agent->prev_log_prob = log_prob;
     agent->prev_value    = value_critic;
     agent->prev_done     = agent->done;   // done di s_t, usato al prossimo push
 
-    // 5. Output raw action — user clips before sending if desired
+    // 5. Output action — con tanh squash e' gia' in (-1, 1)
     memcpy(action_out, action, N_ACT_DIMS * sizeof(float));
 
     // 6. Update counters — su done resettiamo solo il contatore di episodio.
@@ -433,7 +441,6 @@ void ppo_step(PPOAgent *agent, const float *obs, float *action_out)
             ppo_update(agent->actor, agent->critic, &agent->buf);
             if (agent->on_train_end)   agent->on_train_end();
         }
-        agent->buf.head           = 0;
         agent->buf.size           = 0;
         agent->rollout_step_count = 0;
     }
@@ -490,7 +497,6 @@ uint32_t ppo_step_discrete(PPOAgent *agent, const float *obs)
             ppo_update(agent->actor, agent->critic, &agent->buf);
             if (agent->on_train_end)   agent->on_train_end();
         }
-        agent->buf.head           = 0;
         agent->buf.size           = 0;
         agent->rollout_step_count = 0;
     }

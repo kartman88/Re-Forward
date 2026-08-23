@@ -31,29 +31,19 @@ int uart_recv_floats(UART_HandleTypeDef *huart, float *dst, size_t dim,
     return 1;
 }
 
-int uart_send_float_action(UART_HandleTypeDef *huart, float action_val,
-                           uint8_t done, uint32_t timeout) {
-    uint8_t pkt[7];
-    pkt[0] = 0x02;
-    memcpy(&pkt[1], &action_val, 4);
-    pkt[5] = done;
-    pkt[6] = 0x03;
-    return HAL_UART_Transmit(huart, pkt, 7, timeout) == HAL_OK ? 1 : 0;
-}
-
-int uart_send_floats_action(UART_HandleTypeDef *huart, const float *actions,
-                            size_t n, uint8_t done, uint32_t timeout) {
+int uart_send_action(UART_HandleTypeDef *huart, const float *actions, size_t n,
+                     uint8_t done, uint32_t timeout) {
     // packet: [STX][float_0]...[float_{n-1}][done][ETX]
-    uint8_t pkt[2 + 16 * sizeof(float) + 1]; // supports up to 16 action dims
-    pkt[0] = 0x02;
-    memcpy(&pkt[1], actions, n * sizeof(float));
-    pkt[1 + n * sizeof(float)] = done;
-    pkt[2 + n * sizeof(float)] = 0x03;
-    return HAL_UART_Transmit(huart, pkt, 3 + n * sizeof(float), timeout) == HAL_OK ? 1 : 0;
-}
+    uint8_t pkt[2 + UART_MAX_ACTION_DIMS * sizeof(float) + 1];
 
-int uart_send_action_discrete(UART_HandleTypeDef *huart, uint32_t action,
-                              uint8_t done, uint32_t timeout) {
-    uint8_t pkt[4] = {0x02, (uint8_t)(action & 0xFF), done, 0x03};
-    return HAL_UART_Transmit(huart, pkt, 4, timeout) == HAL_OK ? 1 : 0;
+    // La versione precedente non validava n: con n > 16 scriveva oltre pkt.
+    if (n == 0 || n > UART_MAX_ACTION_DIMS)
+        return 0;
+
+    const size_t payload = n * sizeof(float);
+    pkt[0] = 0x02;
+    memcpy(&pkt[1], actions, payload);
+    pkt[1 + payload] = done;
+    pkt[2 + payload] = 0x03;
+    return HAL_UART_Transmit(huart, pkt, payload + 3, timeout) == HAL_OK ? 1 : 0;
 }

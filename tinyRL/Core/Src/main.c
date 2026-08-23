@@ -96,8 +96,10 @@ static float compute_reward(const float *obs, const float *action) {
 }
 #endif
 
+#if USE_CONTINUOUS_ACTION
 // Osservazione corrente condivisa con is_done (aggiornata nel loop prima di ppo_step)
 static float s_cur_obs[OBS_DIM];
+#endif
 
 static uint8_t is_done(uint32_t step_in_ep) {
     if (step_in_ep >= MAX_STEPS_PER_EP) return 1;
@@ -107,6 +109,83 @@ static uint8_t is_done(uint32_t step_in_ep) {
 #endif
     return 0;
 }
+
+#if BENCH_KERNELS
+/* Micro-benchmark eseguito una volta all'avvio, prima del loop di training.
+ * Attribuisce il costo del forward alle sue componenti: serve a sapere quanto
+ * dei ~312 ms di forward per update sia irriducibile — le 64 chiamate tanhf
+ * per campione dei due hidden layer dell'actor — e quanto stia invece nel
+ * prodotto matrice-vettore.
+ *
+ * Emette righe "<<<BENCH>>>nome,cicli_per_chiamata". Il costo include
+ * l'overhead di loop: la riga "loop" e' la baseline da sottrarre.
+ *
+ * Il trainer lato PC tollera queste righe senza modifiche: cerca "<<<PROF>>>"
+ * per il profiling e 0x02 per i frame azione, e il testo ASCII non contiene
+ * ne' l'uno ne' l'altro. Resta nel buffer di ricezione finche' il primo frame
+ * azione non lo consuma insieme a se'. */
+static void bench_emit(const char *name, uint32_t cycles, uint32_t n) {
+  char line[96];
+  int k = snprintf(line, sizeof(line), "<<<BENCH>>>%s,%lu\n",
+                   name, (unsigned long)(cycles / n));
+  HAL_UART_Transmit(&huart3, (uint8_t *)line, k, 1000);
+}
+
+static void bench_kernels(Network *actor, Network *critic) {
+  enum { NB = 4096 };
+  volatile float sink = 0.f;
+  float in[16], obs[OBS_DIM];
+  uint32_t t0;
+
+  for (int i = 0; i < 16; i++)
+    in[i] = -4.0f + 0.5f * (float)i;          /* pre-attivazioni tipiche */
+  for (int i = 0; i < OBS_DIM; i++)
+    obs[i] = 0.1f * (float)i;
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += in[i & 15];
+  bench_emit("loop", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += tanhf(in[i & 15]);
+  bench_emit("tanhf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += expf(in[i & 15]);
+  bench_emit("expf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += logf(fabsf(in[i & 15]) + 0.1f);
+  bench_emit("logf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += atanhf(in[i & 15] * 0.24f);
+  bench_emit("atanhf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += sqrtf(fabsf(in[i & 15]) + 0.1f);
+  bench_emit("sqrtf", dwt_delta(t0, dwt_ticks()), NB);
+
+  /* Reti intere: actor (hidden tanh) contro critic (hidden relu), stessa
+   * topologia a meno dell'ultimo layer. La differenza e' il costo delle tanh. */
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) network_forward(actor, obs, NULL);
+  bench_emit("actor_fwd", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) network_forward(critic, obs, NULL);
+  bench_emit("critic_fwd", dwt_delta(t0, dwt_ticks()), NB);
+
+  (void)sink;
+
+  /* Il benchmark dura qualche decimo di secondo, durante i quali il PC sta
+   * gia' trasmettendo e la RX va in overrun. Stesso ripristino di
+   * on_train_end: senza, il flag ORE resta alto e la prima ricezione non
+   * riparte piu'. */
+  __HAL_UART_CLEAR_OREFLAG(&huart3);
+  __HAL_UART_SEND_REQ(&huart3, UART_RXDATA_FLUSH_REQUEST);
+}
+#endif /* BENCH_KERNELS */
 
 static void on_train_begin(void) {
     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
@@ -226,6 +305,10 @@ int main(void) {
       while (1);
   }
 
+#if BENCH_KERNELS
+  bench_kernels(&actor, &critic);
+#endif
+
   float obs[OBS_DIM];
 #if USE_CONTINUOUS_ACTION
   float action[N_ACT_DIMS];
@@ -256,10 +339,10 @@ int main(void) {
         if (action[i] >  ACTION_SCALE) action[i] =  ACTION_SCALE;
         if (action[i] < -ACTION_SCALE) action[i] = -ACTION_SCALE;
     }
-    uart_send_floats_action(&huart3, action, N_ACT_DIMS, agent.done, 100);
+    uart_send_action(&huart3, action, N_ACT_DIMS, agent.done, 100);
 #else
     uint32_t act = ppo_step_discrete(&agent, obs);
-    uart_send_float_action(&huart3, PENDULUM_TORQUES[act], agent.done, 100);
+    uart_send_action(&huart3, &PENDULUM_TORQUES[act], 1, agent.done, 100);
 #endif
 
 #if TIME_LOG
@@ -425,7 +508,7 @@ static void MX_GPIO_Init(void) {
 
 /* MPU Configuration */
 
-void MPU_Config(void) {
+static void MPU_Config(void) {
   MPU_Region_InitTypeDef MPU_InitStruct = {0};
 
   /* Disables the MPU */

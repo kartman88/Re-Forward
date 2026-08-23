@@ -6,6 +6,9 @@ Il training di PPO su Pendulum non convergeva. Dopo analisi manuale completa di 
 sorgente (ppo.c, neural_net.c, dense_layer.c, main.c, hil_trainer_continuous.py) sono stati
 identificati e corretti 6 bug reali, di cui 3 critici.
 
+BUG-7 è stato trovato in seguito, durante il lavoro di ottimizzazione documentato in
+`OPTIMIZATIONS.md`, dal test di equivalenza dei kernel (`test/test_equiv.c`).
+
 ---
 
 ## Bug Corretti
@@ -110,6 +113,50 @@ aggiunto `if (buf->head >= buf->capacity) return;` all'inizio di entrambe le var
 
 ---
 
+### BUG-7 — CRITICAL: aliasing del buffer del delta in `backward_from_delta`
+**File:** `Core/Src/neural_net.c`
+
+**Problema:**
+```c
+float *delta = delta_out;
+for (int l = num_layers - 1; l >= 0; --l) {
+    ...
+    for (int j = 0; j < in_dim; ++j) {
+        float acc = 0.f;
+        for (int i = 0; i < out_dim; ++i)
+            acc += delta[i] * ly->W[i][j];   // legge TUTTO delta ad ogni j
+        delta_buf[j] = acc;                  // ...e ne sovrascrive l'elemento j
+    }
+    delta = delta_buf;                       // dal prossimo layer delta == delta_buf
+}
+```
+Dopo la prima propagazione `delta` e `delta_buf` sono **lo stesso puntatore**.
+Al layer successivo, l'iterazione `j = 0` scrive `delta_buf[0]`, che è
+`delta[0]`: tutte le iterazioni `j >= 1` leggono quindi un delta già corrotto.
+
+Con la topologia `[11, 32, 32, ·]` (tre layer di pesi) l'effetto colpisce il
+gradiente del **primo layer** di actor e critic — la matrice più grande delle
+due, 32×11 — che risultava sistematicamente sbagliato. Il bug è silenzioso:
+niente NaN, niente crash, solo un gradiente errato. Si manifesta su qualsiasi
+rete con almeno 3 layer di pesi; con 2 layer non c'è aliasing e non si vede.
+
+**Fix:** il buffer del delta è ora un pool a due metà usate a ping-pong, così
+sorgente e destinazione non coincidono mai. La capacità viene dimensionata una
+volta sul layer più largo prima di iniziare la passata: la vecchia `realloc`
+dentro il loop poteva invalidare un `delta` ancora in uso (secondo difetto,
+latente sulle topologie attuali perché `in_dim` non cresce mai andando
+indietro, ma reale su una rete tipo `[11, 64, 32, 1]`).
+
+**Come è stato trovato:** `test/test_equiv.c` confronta i gradienti prodotti
+dai kernel contro un'implementazione di riferimento. I layer 1 e 2 combaciavano
+esattamente, il layer 0 no.
+
+**Impatto sulle misure:** tutte le learning curve raccolte prima di questo fix
+sono state prodotte con il gradiente del primo layer sbagliato. Vanno
+riacquisite prima di qualsiasi confronto.
+
+---
+
 ## Bug Verificati e Scartati (falsi positivi)
 
 | Segnalazione | Verifica | Verdetto |
@@ -134,6 +181,7 @@ aggiunto `if (buf->head >= buf->capacity) return;` all'inizio di entrambe le var
 | `Core/Inc/ppo.h` | Aggiunto campo `uint32_t capacity` alla struct `RolloutBuffer` |
 | `Core/Src/neural_net.c` | `critic_backward` accetta ora `float coeff` |
 | `Core/Inc/neural_net.h` | Aggiornata dichiarazione di `critic_backward` |
+| `Core/Src/neural_net.c` | BUG-7: pool a ping-pong per il delta, dimensionato prima della passata |
 
 ---
 

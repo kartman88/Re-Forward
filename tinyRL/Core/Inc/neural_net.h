@@ -29,6 +29,9 @@
 // Usando fminf/fmaxf, un eventuale mu NaN viene sanificato a +-MU_CLAMP.
 #define MU_CLAMP        8.0f
 
+// log(2*pi) — usata dalla log-likelihood gaussiana in neural_net.c e ppo.c.
+#define LOG_2PI         1.8378770664093453f
+
 typedef struct {
     DenseLayer *layers;
     uint8_t     num_layers;
@@ -40,9 +43,11 @@ void softmax(float *in, float *out, int n);
 int  network_init(Network *net, int num_layers, int *topology,
                   ActivationType *activations);
 int  network_forward(Network *net, float *input, float *out);
-void network_zero_grad(Network *net);
-void network_clip_grad(Network *net);
-void network_adam_update(Network *net, float lr);
+void  network_zero_grad(Network *net);
+// Ritorna il fattore di scala da passare a network_adam_update (1.0 = nessun
+// clipping, 0.0 = gradiente non finito, update da scartare).
+float network_clip_grad(Network *net, float max_norm);
+void  network_adam_update(Network *net, float lr, float gscale);
 
 // PPO discrete
 void  actor_forward(Network *actor, float *obs, float *probs_out,
@@ -56,11 +61,16 @@ void  critic_backward(Network *critic, float *obs, float value_target, float coe
 #if USE_CONTINUOUS_ACTION
 // PPO continuous diagonal Gaussian, state-independent std.
 // Actor outputs N_ACT_DIMS means (μ); σ lives in g_ppo_log_sigma (ppo.h).
-void  actor_forward_continuous(Network *actor, float *obs, float *action,
-                               float *log_sigma,
-                               float *log_prob_out, float *entropy_out);
-void  actor_backward_continuous(Network *actor, float *obs, float *action,
-                                float *log_sigma,
+// `z` e' l'azione pre-squash presa dal rollout buffer; `var`/`log_var` sono
+// precalcolati una volta per update (sigma e' costante durante l'update).
+// Il bonus di entropia (PPO_C2) NON e' applicato in modalita' continua:
+// l'esplorazione e' governata dallo schedule di sigma (ppo_sigma_decay), non
+// da un termine nella loss. Vedi il commento su PPO_C2 in ppo.h.
+void  actor_forward_continuous(Network *actor, float *obs, const float *z,
+                               const float *var, const float *log_var,
+                               float *log_prob_out);
+void  actor_backward_continuous(Network *actor, float *obs, const float *z,
+                                const float *var,
                                 float advantage, float ratio, float clip_eps);
 #endif
 

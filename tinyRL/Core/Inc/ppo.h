@@ -20,10 +20,14 @@
  * fra H7 e F446 le due build devono girare sulla stessa architettura di rete e
  * sullo stesso numero di step per update. */
 #define ROLLOUT_STEPS     512
+/* ppo_update indicizza il rollout con uint16_t per dimezzare quell'array. */
+_Static_assert(ROLLOUT_STEPS <= 65535, "ROLLOUT_STEPS non entra in uint16_t");
 #define PPO_C1            0.5f
+/* Bonus di entropia: usato solo in modalita' discreta. Con azioni continue
+ * l'esplorazione e' governata dallo schedule di sigma (ppo_sigma_decay), non
+ * da un termine nella loss, quindi PPO_C2 non entra nel gradiente. */
 #define PPO_C2            0.01f
 #define PPO_GRAD_CLIP     0.5f
-#define PPO_OBS_DIM       OBS_DIM
 
 // Actor output size: use PPO_ACTOR_OUT_DIM to set the last layer of the actor network.
 #if USE_CONTINUOUS_ACTION
@@ -55,7 +59,11 @@ void ppo_sigma_decay(void);
 
 // ── Rollout Buffer ─────────────────────────────────────────────────────────────
 
+/* Tutti i vettori sono viste dentro `arena`, una sola allocazione.
+ * `size` e' insieme il numero di transizioni valide e la testa di scrittura:
+ * i due contatori separati di prima erano sempre uguali per costruzione. */
 typedef struct {
+    float    *arena;
     float    *states;
     float    *log_probs_old;
     float    *values;
@@ -68,7 +76,6 @@ typedef struct {
     uint32_t *actions;
 #endif
     uint8_t  *dones;
-    uint32_t  head;
     uint32_t  size;
     uint32_t  capacity;
     uint32_t  obs_dim;
@@ -92,11 +99,14 @@ extern TrainTiming g_train_timing;
 #endif /* TIME_LOG */
 
 int  rollout_buffer_init(RolloutBuffer *buf, uint32_t T, uint32_t obs_dim);
+void rollout_buffer_free(RolloutBuffer *buf);
 #if USE_CONTINUOUS_ACTION
-void rollout_buffer_push(RolloutBuffer *buf, float *obs, float *action,
+// `z` e' l'azione PRE-squash: e' quella che serve a rivalutare la gaussiana
+// durante l'update, e non richiede l'atanhf di ricostruzione.
+void rollout_buffer_push(RolloutBuffer *buf, const float *obs, const float *z,
                          float reward, uint8_t done, float log_prob, float value);
 #else
-void rollout_buffer_push(RolloutBuffer *buf, float *obs, uint32_t action,
+void rollout_buffer_push(RolloutBuffer *buf, const float *obs, uint32_t action,
                          float reward, uint8_t done, float log_prob, float value);
 #endif
 
@@ -106,9 +116,10 @@ void normalize_advantages(RolloutBuffer *buf);
 // ── Action sampling ───────────────────────────────────────────────────────────
 
 #if USE_CONTINUOUS_ACTION
+// action_out = tanh(z) per l'ambiente e il reward; z_out va nel rollout buffer.
 void     actor_sample_action(Network *actor, float *obs, float *action_out,
-                             float *log_prob_out, float *value_out,
-                             Network *critic);
+                             float *z_out, float *log_prob_out,
+                             float *value_out, Network *critic);
 #else
 uint32_t actor_sample_action(Network *actor, float *obs,
                               float *log_prob_out, float *value_out,
@@ -138,7 +149,8 @@ typedef struct {
 
     float          prev_obs[OBS_DIM];
 #if USE_CONTINUOUS_ACTION
-    float          prev_action[N_ACT_DIMS];
+    float          prev_action[N_ACT_DIMS];  // squashata: serve a reward_fn
+    float          prev_z[N_ACT_DIMS];       // pre-squash: va nel buffer
 #else
     uint32_t       prev_action;
 #endif
