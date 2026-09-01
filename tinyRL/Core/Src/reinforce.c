@@ -4,10 +4,19 @@
 #include <string.h>
 #include <stdlib.h>
 
+/* Profiling: quando TIME_LOG e' 0 le macro spariscono e non lasciano
+ * riferimenti a variabili inesistenti, cosi' il loop caldo di reinforce_update
+ * resta leggibile invece di essere spezzato da una dozzina di #if. */
 #if TIME_LOG
 #include "utils.h"   /* dwt_ticks / dwt_delta per il profiling */
 
 TrainTiming g_train_timing = {0};
+
+#define PROF_T(name)       uint32_t name = dwt_ticks()
+#define PROF_ADD(acc, t0)  ((acc) += dwt_delta((t0), dwt_ticks()))
+#else
+#define PROF_T(name)       ((void)0)
+#define PROF_ADD(acc, t0)  ((void)0)
 #endif
 
 #if USE_CONTINUOUS_ACTION
@@ -21,24 +30,48 @@ void reinforce_sigma_init(void) {
 
 // ─── Episode Buffer ───────────────────────────────────────────────────────────
 
+/* Un'unica arena per l'intero buffer invece di 4 malloc separate. */
 int episode_buffer_init(EpisodeBuffer *buf, uint32_t T, uint32_t obs_dim) {
+    if (T == 0 || obs_dim == 0) return 0;
+
     buf->obs_dim  = obs_dim;
     buf->size     = 0;
     buf->capacity = T;
+    buf->arena    = NULL;
 
-    buf->states  = malloc(T * obs_dim * sizeof(float));
-    buf->rewards = malloc(T * sizeof(float));
-    buf->returns = malloc(T * sizeof(float));
 #if USE_CONTINUOUS_ACTION
-    buf->actions = malloc(T * N_ACT_DIMS * sizeof(float));
+    /* azioni continue: N_ACT_DIMS float per step, quindi tutto a 4 byte */
+    const size_t n_word = (size_t)T * obs_dim + 2u * T + (size_t)T * N_ACT_DIMS;
+    const size_t bytes  = n_word * sizeof(float);
 #else
-    buf->actions = malloc(T * sizeof(uint32_t));
+    /* azioni discrete: un byte per step, in coda ai vettori a 4 byte */
+    const size_t n_word = (size_t)T * obs_dim + 2u * T;
+    const size_t bytes  = n_word * sizeof(float) + (size_t)T;
 #endif
 
-    if (!buf->states || !buf->rewards || !buf->returns || !buf->actions)
-        return 0;
+    float *arena = malloc(bytes);
+    if (!arena) return 0;
+    buf->arena = arena;
 
+    float *p = arena;
+    buf->states  = p; p += (size_t)T * obs_dim;
+    buf->rewards = p; p += T;
+    buf->returns = p; p += T;
+#if USE_CONTINUOUS_ACTION
+    buf->actions = p;
+#else
+    buf->actions = (uint8_t *)p;
+#endif
     return 1;
+}
+
+void episode_buffer_free(EpisodeBuffer *buf) {
+    if (!buf || !buf->arena) return;
+    free(buf->arena);
+    buf->arena   = NULL;
+    buf->states  = buf->rewards = buf->returns = NULL;
+    buf->actions = NULL;
+    buf->size    = 0;
 }
 
 void episode_buffer_reset(EpisodeBuffer *buf) {
@@ -58,10 +91,13 @@ void episode_buffer_push(EpisodeBuffer *buf, const float *obs,
 #else
 void episode_buffer_push(EpisodeBuffer *buf, const float *obs,
                          uint32_t action, float reward) {
-    if (buf->size >= buf->capacity) return;
+    /* L'indice azione viene troncato a uint8_t: un valore fuori range
+     * diventerebbe silenziosamente un'azione diversa da quella eseguita,
+     * cioe' una transizione falsa nella traiettoria. Meglio scartarla. */
+    if (buf->size >= buf->capacity || action >= N_ACTIONS) return;
     uint32_t idx = buf->size;
     memcpy(&buf->states[idx * buf->obs_dim], obs, buf->obs_dim * sizeof(float));
-    buf->actions[idx] = action;
+    buf->actions[idx] = (uint8_t)action;
     buf->rewards[idx] = reward;
     buf->size++;
 }
@@ -113,8 +149,10 @@ void policy_sample_action(Network *policy, float *obs, float *action_out) {
 
 // Campionamento "roulette-wheel" dalla categorica prodotta dal softmax.
 uint32_t policy_sample_action(Network *policy, float *obs) {
-    float probs[N_ACTIONS];
-    network_forward(policy, obs, probs);
+    /* out = NULL: le probabilita' si leggono direttamente dal buffer di uscita
+     * dell'ultimo layer, senza copiarle prima in un array locale. */
+    network_forward(policy, obs, NULL);
+    const float *probs = policy->layers[policy->num_layers - 1].out;
 
     int   n = policy->layers[policy->num_layers - 1].out_dim;
     float c = rng_uniform();
@@ -145,26 +183,47 @@ void reinforce_update(Network *policy, EpisodeBuffer *buf) {
 
     network_zero_grad(policy);
 
-    for (uint32_t t = 0; t < buf->size; t++) {
-        float *state = &buf->states[t * buf->obs_dim];
-        float  ret   = buf->returns[t];
+    /* Costanti per l'intero update, sollevate fuori dal loop sui campioni.
+     *
+     * inv_T e' la media del gradiente sull'episodio: REINFORCE accumula un
+     * contributo per ogni step, quindi senza di essa l'ampiezza dipenderebbe
+     * dalla lunghezza dell'episodio (su CartPole varia da ~10 a 500 step).
+     * Prima era applicata a valle da network_scale_grad, una passata di
+     * read-modify-write su TUTTI i parametri della rete; ora viaggia dentro i
+     * due coefficienti scalari del delta di uscita. Entrambi i termini della
+     * loss sono lineari nel proprio coefficiente, quindi il risultato e' lo
+     * stesso e la passata sparisce del tutto. */
+    const float inv_T = 1.f / (float)buf->size;
 
-#if TIME_LOG
-        uint32_t _tf = dwt_ticks();
+#if USE_CONTINUOUS_ACTION
+    /* sigma e' fissa per tutto il training: 1/sigma^2 si calcola una volta per
+     * update invece di rifare s*s e una divisione a ogni step. */
+    float inv_var[N_ACT_DIMS];
+    for (int i = 0; i < N_ACT_DIMS; i++)
+        inv_var[i] = 1.f / (g_reinforce_sigma[i] * g_reinforce_sigma[i]);
+#else
+    /* Anche il coefficiente di entropia porta il fattore 1/T: il termine
+     * -ent_coef*H della loss e' lineare in ent_coef come quello di policy
+     * gradient lo e' in G, quindi entrambi si mediano dallo stesso lato. */
+    const float ent_coef = REINFORCE_ENT_COEF * inv_T;
 #endif
+
+    for (uint32_t t = 0; t < buf->size; t++) {
+        const float *state = &buf->states[t * buf->obs_dim];
+        const float  ret   = buf->returns[t] * inv_T;
+
+        PROF_T(_tf);
         // Re-forward: il backward legge le attivazioni dell'ultimo forward.
         network_forward(policy, state, NULL);
-#if TIME_LOG
-        _fwd_cyc += dwt_delta(_tf, dwt_ticks());
-        uint32_t _tb = dwt_ticks();
-#endif
+        PROF_ADD(_fwd_cyc, _tf);
+
+        PROF_T(_tb);
 #if USE_CONTINUOUS_ACTION
         policy_backward_continuous(policy, state,
                                    &buf->actions[t * N_ACT_DIMS],
-                                   g_reinforce_sigma, ret);
+                                   inv_var, ret);
 #else
-        policy_backward(policy, state, buf->actions[t], ret,
-                        REINFORCE_ENT_COEF);
+        policy_backward(policy, state, buf->actions[t], ret, ent_coef);
 #endif
 #if TIME_LOG
         uint32_t _now = dwt_ticks();
@@ -174,15 +233,14 @@ void reinforce_update(Network *policy, EpisodeBuffer *buf) {
 #endif
     }
 
-#if TIME_LOG
-    uint32_t _ta = dwt_ticks();
-#endif
-    network_scale_grad(policy, 1.f / (float)buf->size);
-    network_clip_grad(policy);
-    network_adam_update(policy, REINFORCE_LR);
+    PROF_T(_ta);
+    /* Il clipping non riscrive piu' i gradienti: ritorna il fattore di scala,
+     * che Adam applica al volo mentre carica dW/db. */
+    float gscale = network_clip_grad(policy, GRAD_CLIP);
+    network_adam_update(policy, REINFORCE_LR, gscale);
 #if TIME_LOG
     uint32_t _end = dwt_ticks();
-    _tot_cyc += dwt_delta(_t_chunk, _end);   /* coda: scale/clip/adam */
+    _tot_cyc += dwt_delta(_t_chunk, _end);   /* coda: clip/adam */
 
     g_train_timing.adam_cycles     = dwt_delta(_ta, _end);
     g_train_timing.forward_cycles  = _fwd_cyc;

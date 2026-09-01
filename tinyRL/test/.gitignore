@@ -1,0 +1,5 @@
+test_equiv
+test_update
+test_equiv_asan
+test_update_asan
+*.o

@@ -97,6 +97,71 @@ static uint8_t is_done(uint32_t step_in_ep) {
     return 0;
 }
 
+#if BENCH_KERNELS
+/* Micro-benchmark eseguito una volta all'avvio, prima del loop di training.
+ * Attribuisce il costo del forward alle sue componenti: dice quanto del tempo
+ * per step stia nelle funzioni trascendenti (che newlib implementa in
+ * software) e quanto nel prodotto matrice-vettore.
+ *
+ * Su REINFORCE discreto il forward finisce con un softmax (expf per azione) e
+ * il backward con i logf dell'entropia: sono le uniche trascendenti del
+ * percorso caldo, e questo dice quanto pesano davvero.
+ *
+ * Emette righe "<<<BENCH>>>nome,cicli_per_chiamata". Il costo include
+ * l'overhead di loop: la riga "loop" e' la baseline da sottrarre. Il `volatile
+ * sink` impedisce a -Ofast di eliminare tutto come codice morto. */
+static void bench_emit(const char *name, uint32_t cycles, uint32_t n) {
+  char line[96];
+  int k = snprintf(line, sizeof(line), "<<<BENCH>>>%s,%lu\n",
+                   name, (unsigned long)(cycles / n));
+  HAL_UART_Transmit(&huart3, (uint8_t *)line, k, 1000);
+}
+
+static void bench_kernels(Network *policy) {
+  enum { NB = 4096 };
+  volatile float sink = 0.f;
+  float in[16], obs[OBS_DIM];
+  uint32_t t0;
+
+  for (int i = 0; i < 16; i++)
+    in[i] = -4.0f + 0.5f * (float)i;          /* pre-attivazioni tipiche */
+  for (int i = 0; i < OBS_DIM; i++)
+    obs[i] = 0.1f * (float)i;
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += in[i & 15];
+  bench_emit("loop", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += expf(in[i & 15]);
+  bench_emit("expf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += logf(fabsf(in[i & 15]) + 0.1f);
+  bench_emit("logf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += tanhf(in[i & 15]);
+  bench_emit("tanhf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) sink += sqrtf(fabsf(in[i & 15]) + 0.1f);
+  bench_emit("sqrtf", dwt_delta(t0, dwt_ticks()), NB);
+
+  t0 = dwt_ticks();
+  for (int i = 0; i < NB; i++) network_forward(policy, obs, NULL);
+  bench_emit("policy_fwd", dwt_delta(t0, dwt_ticks()), NB);
+
+  (void)sink;
+
+  /* Il benchmark dura qualche decimo di secondo, durante i quali il PC sta
+   * gia' trasmettendo e la RX va in overrun: stesso ripristino di on_train_end.
+   * Senza, il flag ORE resta alto e la prima ricezione non riparte piu'. */
+  __HAL_UART_CLEAR_OREFLAG(&huart3);
+  __HAL_UART_SEND_REQ(&huart3, UART_RXDATA_FLUSH_REQUEST);
+}
+#endif /* BENCH_KERNELS */
+
 static void on_train_begin(void) {
     HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
 }
@@ -208,6 +273,9 @@ int main(void) {
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
   if (init_ok) {
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);   // LD1 = ready
+#if BENCH_KERNELS
+      bench_kernels(&policy);
+#endif
   } else {
       HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);  // LD3 = alloc fail
       while (1);
@@ -244,7 +312,7 @@ int main(void) {
         if (action[i] >  ACTION_SCALE) action[i] =  ACTION_SCALE;
         if (action[i] < -ACTION_SCALE) action[i] = -ACTION_SCALE;
     }
-    uart_send_floats_action(&huart3, action, N_ACT_DIMS, agent.done, 100);
+    uart_send_action(&huart3, action, N_ACT_DIMS, agent.done, 100);
 #else
     uint32_t act = reinforce_step_discrete(&agent, obs);
     uart_send_action_discrete(&huart3, act, agent.done, 100);

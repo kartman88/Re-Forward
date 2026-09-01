@@ -1,11 +1,12 @@
-#include "stm32h7xx.h"
-#include <stdint.h>
-
 #ifndef INC_UTILS_H_
 #define INC_UTILS_H_
 
-float clip(float value, float range_min, float range_max);
-int dwt_init(void);
+/* Gli #include stavano PRIMA della include guard: venivano riprocessati ad
+ * ogni inclusione del file. */
+#include "stm32h7xx.h"
+#include <stdint.h>
+
+int      dwt_init(void);
 uint32_t dwt_ticks(void);
 uint32_t dwt_delta(uint32_t start, uint32_t stop);
 uint32_t cycles_to_ms(uint32_t cycles);

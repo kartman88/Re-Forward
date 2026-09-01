@@ -30,14 +30,35 @@ void reinforce_sigma_init(void);
 // REINFORCE e' Monte-Carlo: serve la traiettoria completa di UN episodio, che
 // viene consumata e svuotata a ogni update.
 
+/* L'azione discreta sta in un byte: con N_ACTIONS = 2 un uint32_t per step
+ * sprecava 1,5 KB su MAX_STEPS_PER_EP = 500. Lo _Static_assert lega il tipo
+ * alla costante che lo giustifica. */
+#if !USE_CONTINUOUS_ACTION
+_Static_assert(N_ACTIONS <= 255, "action index deve stare in uint8_t");
+#endif
+_Static_assert(MAX_STEPS_PER_EP > 0, "MAX_STEPS_PER_EP deve essere positivo");
+
+/* Buffer di episodio in UNA sola allocazione, con i vettori come viste dentro
+ * l'arena, invece di 4 malloc separate. Oltre all'overhead sparisce il
+ * percorso di fallimento parziale: prima, se la terza malloc falliva, le
+ * prime due restavano allocate e la init tornava 0 — leak silenzioso in un
+ * contesto senza OS.
+ *
+ * Layout con i campi a 4 byte prima di quelli a 1 byte, cosi' l'aritmetica dei
+ * puntatori resta allineata senza padding esplicito:
+ *     [ states | rewards | returns | actions ]
+ *
+ * `size` e `capacity` non sono ridondanti: il buffer si riempie fino a
+ * capacity e viene svuotato a ogni update. */
 typedef struct {
-    float    *states;
-    float    *rewards;
+    float    *arena;      // base dell'allocazione, la libera episode_buffer_free()
+    float    *states;     // [capacity * obs_dim]
+    float    *rewards;    // [capacity]
     float    *returns;    // ritorni scontati, poi normalizzati in place
 #if USE_CONTINUOUS_ACTION
-    float    *actions;
+    float    *actions;    // [capacity * N_ACT_DIMS]
 #else
-    uint32_t *actions;
+    uint8_t  *actions;    // [capacity]
 #endif
     uint32_t  size;
     uint32_t  capacity;
@@ -62,6 +83,7 @@ extern TrainTiming g_train_timing;
 #endif /* TIME_LOG */
 
 int  episode_buffer_init(EpisodeBuffer *buf, uint32_t T, uint32_t obs_dim);
+void episode_buffer_free(EpisodeBuffer *buf);
 void episode_buffer_reset(EpisodeBuffer *buf);
 #if USE_CONTINUOUS_ACTION
 void episode_buffer_push(EpisodeBuffer *buf, const float *obs,
