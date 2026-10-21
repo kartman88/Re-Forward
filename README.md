@@ -2,7 +2,7 @@
 
 Hardware-in-the-Loop (HIL) Reinforcement Learning: an STM32 microcontroller runs the full neural network and REINFORCE training loop, while the PC runs the Gymnasium environment and handles serial communication.
 
-This branch targets a **NUCLEO-F446RE** (STM32F446RET6, Cortex-M4 @ 84 MHz); the port to the NUCLEO-H743ZI2 used by the `PPO` and `DQN` branches lives in `REINFORCE_H7`.
+This branch targets a **NUCLEO-F446RE** (STM32F446RET6, Cortex-M4 @ 180 MHz); the port to the NUCLEO-H743ZI2 used by the `PPO` and `DQN` branches lives in `REINFORCE_H7`.
 
 ---
 
